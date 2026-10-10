@@ -18,7 +18,9 @@
     "updatedAt": "2026-10-10T00:00:00Z",
     "expectedSha256": null,
     "actualSha256": null,
-    "checksumResult": null
+    "checksumResult": null,
+    "retryCount": 3,
+    "nextRetryAt": null
   },
   "progress": {
     "taskId": "contract-task",

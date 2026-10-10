@@ -1,4 +1,6 @@
-use super::errors::{http_status_error, map_io_err, map_reqwest_err, network_deadline};
+use super::errors::{
+    http_status_error_with_retry_after, map_io_err, map_reqwest_err, network_deadline,
+};
 use crate::domain::{AppError, ErrorCode};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
@@ -281,7 +283,12 @@ async fn transfer(
             ));
         }
         StatusCode::OK | StatusCode::PARTIAL_CONTENT => {}
-        status => return Err(http_status_error(status)),
+        status => {
+            return Err(http_status_error_with_retry_after(
+                status,
+                response.headers().get(header::RETRY_AFTER),
+            ));
+        }
     }
 
     let metadata = validate_metadata(&response, &resume)?;

@@ -1,3 +1,4 @@
+use crate::application::retry::{PER_HOST_LIMIT, RETRY_BUDGET, next_retry_at};
 use crate::domain::filename::{filename_from_url, sanitize_filename};
 use crate::domain::transitions::ensure_transition;
 use crate::domain::url_policy::validate_download_url;
@@ -5,7 +6,7 @@ use crate::domain::{
     AppError, CreateDownloadRequest, DownloadStatus, DownloadTask, ErrorCode, ProgressEvent, Queue,
     RemoveDownloadRequest, RemoveDownloadResult, Settings, TaskError, UpdateSettingsRequest,
 };
-use crate::infrastructure::db::Database;
+use crate::infrastructure::db::{Database, is_unique_constraint};
 use crate::infrastructure::files::ManagedFiles;
 use crate::infrastructure::http::{ResumeMetadata, cancel_pair, download_managed};
 use crate::infrastructure::ownership::DataDirectoryLease;
@@ -16,6 +17,7 @@ use reqwest::Client;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 use uuid::Uuid;
 
@@ -39,6 +41,8 @@ struct ManagerInner {
     workers: Mutex<HashMap<String, WorkerHandle>>,
     mutations: Mutex<()>,
     controls: tokio::sync::Mutex<()>,
+    shutting_down: AtomicBool,
+    retry_wake: Mutex<Option<tauri::async_runtime::JoinHandle<()>>>,
 }
 
 impl DownloadManager {
@@ -61,6 +65,8 @@ impl DownloadManager {
                 workers: Mutex::new(HashMap::new()),
                 mutations: Mutex::new(()),
                 controls: tokio::sync::Mutex::new(()),
+                shutting_down: AtomicBool::new(false),
+                retry_wake: Mutex::new(None),
             }),
         })
     }
@@ -84,10 +90,18 @@ impl DownloadManager {
                     retryable: error.retryable,
                 });
                 task.speed_bytes_per_second = 0;
+                task.next_retry_at = None;
+                task.queue_position = None;
+            }
+            // Interrupted active work becomes Failed; user-paused intent is left alone.
+            if task.status == DownloadStatus::Paused {
+                task.queue_position = None;
+                task.next_retry_at = None;
             }
             task.bump_revision();
             self.inner.db.upsert_download(&task)?;
         }
+        self.dispatch();
         Ok(())
     }
 
@@ -108,6 +122,7 @@ impl DownloadManager {
         }
 
         let url = validate_download_url(&req.url)?;
+        let host = host_from_url(url.as_str());
         let expected_sha256 = crate::domain::task::normalize_sha256(req.expected_sha256)?;
         let settings = self.inner.db.get_settings()?;
         let destination_id = req
@@ -141,6 +156,12 @@ impl DownloadManager {
             .into_owned();
 
         let start_now = req.start_now && settings.auto_start;
+        let queue_id = "default".to_string();
+        let queue_position = if start_now {
+            Some(self.inner.db.next_queue_position(&queue_id)?)
+        } else {
+            None
+        };
         let mut task = DownloadTask {
             id: id.clone(),
             url: url.to_string(),
@@ -162,18 +183,31 @@ impl DownloadManager {
             final_path: Some(final_path.to_string_lossy().to_string()),
             etag: None,
             last_modified: None,
-            request_id: req.request_id,
+            request_id: req.request_id.clone(),
             retry_count: 0,
             expected_sha256,
             actual_sha256: None,
             checksum_result: None,
             finalization: None,
+            next_retry_at: None,
+            queue_id,
+            queue_position,
+            host,
         };
-        self.inner.db.upsert_download(&task)?;
+        if let Err(error) = self.inner.db.upsert_download(&task) {
+            if is_unique_constraint(&error)
+                && let Some(request_id) = req.request_id.as_deref()
+                && let Some(existing) = self.inner.db.find_by_request_id(request_id)?
+            {
+                return Ok(existing);
+            }
+            return Err(error);
+        }
         self.emit_progress(&task);
 
         if start_now {
-            self.spawn_worker(task.id.clone());
+            drop(_mutation);
+            self.dispatch();
             task = self.inner.db.get_download(&id)?;
         }
         Ok(task)
@@ -183,7 +217,9 @@ impl DownloadManager {
         let _control = self.inner.controls.lock().await;
         self.set_stopped_status(id, DownloadStatus::Paused)?;
         self.stop_worker(id).await;
-        self.refresh_partial(id)
+        let task = self.refresh_partial(id)?;
+        self.dispatch();
+        Ok(task)
     }
 
     pub async fn resume(&self, id: &str) -> Result<DownloadTask, AppError> {
@@ -193,19 +229,23 @@ impl DownloadManager {
             DownloadStatus::Queued,
         )?;
         self.stop_worker(id).await;
-        let _mutation = self.inner.mutations.lock();
-        let mut task = self.inner.db.get_download(id)?;
-        ensure_transition(task.status, DownloadStatus::Queued)?;
-        if let Some(temp) = &task.temp_path {
-            let name = managed_name(&self.inner, temp)?;
-            task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
-        }
-        task.status = DownloadStatus::Queued;
-        task.error = None;
-        task.bump_revision();
-        self.inner.db.upsert_download(&task)?;
-        self.emit_progress(&task);
-        self.spawn_worker(task.id.clone());
+        let task = {
+            let _mutation = self.inner.mutations.lock();
+            let mut task = self.inner.db.get_download(id)?;
+            ensure_transition(task.status, DownloadStatus::Queued)?;
+            if let Some(temp) = &task.temp_path {
+                let name = managed_name(&self.inner, temp)?;
+                task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
+            }
+            enqueue_runnable(&self.inner, &mut task)?;
+            task.error = None;
+            task.next_retry_at = None;
+            task.bump_revision();
+            self.inner.db.upsert_download(&task)?;
+            self.emit_progress(&task);
+            task
+        };
+        self.dispatch();
         Ok(task)
     }
 
@@ -213,7 +253,9 @@ impl DownloadManager {
         let _control = self.inner.controls.lock().await;
         self.set_stopped_status(id, DownloadStatus::Canceled)?;
         self.stop_worker(id).await;
-        self.refresh_partial(id)
+        let task = self.refresh_partial(id)?;
+        self.dispatch();
+        Ok(task)
     }
 
     fn set_stopped_status(&self, id: &str, status: DownloadStatus) -> Result<(), AppError> {
@@ -223,6 +265,10 @@ impl DownloadManager {
         task.status = status;
         task.speed_bytes_per_second = 0;
         task.error = None;
+        task.next_retry_at = None;
+        if status == DownloadStatus::Paused || status == DownloadStatus::Canceled {
+            task.queue_position = None;
+        }
         task.bump_revision();
         self.inner.db.upsert_download(&task)?;
         self.emit_progress(&task);
@@ -251,22 +297,25 @@ impl DownloadManager {
             ));
         }
         self.stop_worker(id).await;
-        let _mutation = self.inner.mutations.lock();
-        let mut task = self.inner.db.get_download(id)?;
-        if task.status != DownloadStatus::Failed {
-            return Err(AppError::new(
-                ErrorCode::InvalidTransition,
-                "Only failed tasks can be retried",
-            ));
-        }
-        ensure_transition(task.status, DownloadStatus::Queued)?;
-        task.status = DownloadStatus::Queued;
-        task.error = None;
-        task.retry_count = task.retry_count.saturating_add(1);
-        task.bump_revision();
-        self.inner.db.upsert_download(&task)?;
-        self.emit_progress(&task);
-        self.spawn_worker(task.id.clone());
+        let task = {
+            let _mutation = self.inner.mutations.lock();
+            let mut task = self.inner.db.get_download(id)?;
+            if task.status != DownloadStatus::Failed {
+                return Err(AppError::new(
+                    ErrorCode::InvalidTransition,
+                    "Only failed tasks can be retried",
+                ));
+            }
+            // Manual retry forces immediate dispatch without consuming an extra budget slot.
+            enqueue_runnable(&self.inner, &mut task)?;
+            task.error = None;
+            task.next_retry_at = None;
+            task.bump_revision();
+            self.inner.db.upsert_download(&task)?;
+            self.emit_progress(&task);
+            task
+        };
+        self.dispatch();
         Ok(task)
     }
 
@@ -312,11 +361,85 @@ impl DownloadManager {
                 "Only the app-managed download folder is approved.",
             ));
         }
-        self.inner.db.update_settings(patch)
+        let settings = self.inner.db.update_settings(patch)?;
+        self.dispatch();
+        Ok(settings)
     }
 
     pub fn list_queues(&self) -> Result<Vec<Queue>, AppError> {
         self.inner.db.list_queues()
+    }
+
+    /// Cancel every worker, await drains, and refuse further dispatch.
+    pub async fn shutdown(&self) {
+        self.inner.shutting_down.store(true, Ordering::SeqCst);
+        if let Some(handle) = self.inner.retry_wake.lock().take() {
+            handle.abort();
+        }
+        let ids: Vec<String> = self.inner.workers.lock().keys().cloned().collect();
+        for id in ids {
+            self.stop_worker(&id).await;
+        }
+    }
+
+    pub fn dispatch(&self) {
+        if self.inner.shutting_down.load(Ordering::SeqCst) {
+            return;
+        }
+        let settings = match self.inner.db.get_settings() {
+            Ok(settings) => settings,
+            Err(_) => return,
+        };
+        let max_global = settings.max_concurrent_downloads as usize;
+        let now = Utc::now();
+        let runnable = match self.inner.db.list_runnable_queued(now) {
+            Ok(tasks) => tasks,
+            Err(_) => return,
+        };
+
+        for task in runnable {
+            if self.inner.shutting_down.load(Ordering::SeqCst) {
+                break;
+            }
+            let workers = self.inner.workers.lock();
+            if workers.contains_key(&task.id) {
+                continue;
+            }
+            if workers.len() >= max_global {
+                break;
+            }
+            let host_active = workers
+                .keys()
+                .filter_map(|id| self.inner.db.get_download(id).ok())
+                .filter(|t| t.host == task.host)
+                .count();
+            if host_active >= PER_HOST_LIMIT {
+                continue;
+            }
+            drop(workers);
+            self.spawn_worker(task.id.clone());
+        }
+        self.schedule_retry_wake();
+    }
+
+    fn schedule_retry_wake(&self) {
+        let Some(when) = self.inner.db.earliest_retry_at().ok().flatten() else {
+            return;
+        };
+        let delay = (when - Utc::now())
+            .to_std()
+            .unwrap_or(std::time::Duration::from_millis(0));
+        let mut slot = self.inner.retry_wake.lock();
+        if let Some(handle) = slot.take() {
+            handle.abort();
+        }
+        let manager = DownloadManager {
+            inner: Arc::clone(&self.inner),
+        };
+        *slot = Some(tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(delay).await;
+            manager.dispatch();
+        }));
     }
 
     async fn stop_worker(&self, id: &str) {
@@ -332,10 +455,15 @@ impl DownloadManager {
         let (cancel_tx, cancel_token) = cancel_pair();
         // Hold registry until insertion so a fast worker cannot leave a stale entry.
         let mut workers = self.inner.workers.lock();
+        if workers.contains_key(&task_id) {
+            return;
+        }
         let worker_id = task_id.clone();
         let join = tauri::async_runtime::spawn(async move {
             run_download_job(inner.clone(), worker_id.clone(), cancel_token).await;
             inner.workers.lock().remove(&worker_id);
+            let manager = DownloadManager { inner };
+            manager.dispatch();
         });
         workers.insert(task_id, WorkerHandle { cancel_tx, join });
     }
@@ -362,7 +490,12 @@ async fn run_download_job(
     let _mutation = inner.mutations.lock();
 
     match result {
-        Ok(()) => {}
+        Ok(()) => {
+            if let Ok(mut task) = inner.db.get_download(&task_id) {
+                task.next_retry_at = None;
+                let _ = inner.db.upsert_download(&task);
+            }
+        }
         Err(err) => {
             // Cancellation during pause/cancel is expected; don't overwrite terminal statuses.
             if let Ok(mut task) = inner.db.get_download(&task_id) {
@@ -379,19 +512,39 @@ async fn run_download_job(
                     if task.status != DownloadStatus::Paused {
                         task.status = DownloadStatus::Canceled;
                         task.speed_bytes_per_second = 0;
+                        task.queue_position = None;
+                        task.next_retry_at = None;
                         task.bump_revision();
                         let _ = inner.db.upsert_download(&task);
                         emit(&inner, &task);
                     }
                     return;
                 }
-                task.status = DownloadStatus::Failed;
+                let retry_after = err.retry_after_secs;
+                let retryable = err.retryable;
                 task.speed_bytes_per_second = 0;
                 task.error = Some(TaskError {
                     code: err.code,
                     message: err.message,
-                    retryable: err.retryable,
+                    retryable,
                 });
+                if retryable && task.retry_count < RETRY_BUDGET {
+                    task.retry_count = task.retry_count.saturating_add(1);
+                    task.status = DownloadStatus::Queued;
+                    task.next_retry_at = Some(next_retry_at(task.retry_count, retry_after));
+                    if task.queue_position.is_none() {
+                        task.queue_position = Some(
+                            inner
+                                .db
+                                .next_queue_position(&task.queue_id)
+                                .unwrap_or(i64::MAX),
+                        );
+                    }
+                } else {
+                    task.status = DownloadStatus::Failed;
+                    task.next_retry_at = None;
+                    task.queue_position = None;
+                }
                 task.bump_revision();
                 let _ = inner.db.upsert_download(&task);
                 emit(&inner, &task);
@@ -701,6 +854,8 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
     if task.status.is_active() {
         task.status = DownloadStatus::Failed;
         task.speed_bytes_per_second = 0;
+        task.queue_position = None;
+        task.next_retry_at = None;
         task.error = Some(TaskError {
             code: ErrorCode::NetworkInterrupted,
             message: "Interrupted by application restart. Retry to continue safely.".into(),
@@ -720,6 +875,24 @@ fn emit(inner: &ManagerInner, task: &DownloadTask) {
         status: task.status,
         timestamp: Utc::now(),
     });
+}
+
+fn enqueue_runnable(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), AppError> {
+    ensure_transition(task.status, DownloadStatus::Queued)?;
+    task.status = DownloadStatus::Queued;
+    task.queue_id = "default".into();
+    task.queue_position = Some(inner.db.next_queue_position(&task.queue_id)?);
+    if task.host.is_empty() {
+        task.host = host_from_url(&task.url);
+    }
+    Ok(())
+}
+
+fn host_from_url(raw: &str) -> String {
+    url::Url::parse(raw)
+        .ok()
+        .and_then(|url| url.host_str().map(|host| host.to_ascii_lowercase()))
+        .unwrap_or_else(|| "unknown".into())
 }
 
 fn unique_final_path(

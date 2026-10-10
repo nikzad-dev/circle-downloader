@@ -22,6 +22,8 @@ const sampleTask = {
   speedBytesPerSecond: 0,
   revision: 1,
   error: null,
+  retryCount: 0,
+  nextRetryAt: null,
   createdAt: '2026-01-01T00:00:00.000Z',
   updatedAt: '2026-01-01T00:00:00.000Z',
 }

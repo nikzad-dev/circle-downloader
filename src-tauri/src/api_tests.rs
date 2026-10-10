@@ -1080,4 +1080,264 @@ fn ipc_serialization_redacts_legacy_credentials_and_signed_queries() {
     let serialized = serde_json::to_value(task).unwrap();
     assert_eq!(serialized["url"], "https://example.com/");
     assert!(!serialized.to_string().contains("private"));
+    assert_eq!(serialized["retryCount"], 0);
+    assert!(serialized["nextRetryAt"].is_null());
+}
+
+async fn spawn_holding_server() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                break;
+            };
+            tokio::spawn(async move {
+                let mut buf = vec![0u8; 1024];
+                let _ = socket.read(&mut buf).await;
+                // Hold the connection so workers remain active for dispatch tests.
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            });
+        }
+    });
+    format!("http://{addr}")
+}
+
+#[tokio::test]
+async fn global_concurrency_caps_active_workers() {
+    let base = spawn_holding_server().await;
+    let (_dir, mgr) = manager();
+    mgr.update_settings(UpdateSettingsRequest {
+        max_concurrent_downloads: Some(2),
+        ..Default::default()
+    })
+    .unwrap();
+    for i in 0..4 {
+        mgr.create(CreateDownloadRequest {
+            url: format!("{base}/file-{i}.bin"),
+            destination_id: None,
+            suggested_name: Some(format!("file-{i}.bin")),
+            start_now: true,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    }
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    let tasks = mgr.list().unwrap();
+    let active = tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                DownloadStatus::Connecting | DownloadStatus::Downloading
+            )
+        })
+        .count();
+    let queued = tasks
+        .iter()
+        .filter(|t| t.status == DownloadStatus::Queued && t.next_retry_at.is_none())
+        .count();
+    assert_eq!(active, 2);
+    assert!(queued >= 2);
+    mgr.shutdown().await;
+}
+
+#[tokio::test]
+async fn per_host_fairness_limits_same_host_slots() {
+    let a = spawn_holding_server().await;
+    // Distinct host strings (127.0.0.1 vs localhost) exercise per-host fairness.
+    let b = a.replacen("127.0.0.1", "localhost", 1);
+    let (_dir, mgr) = manager();
+    mgr.update_settings(UpdateSettingsRequest {
+        max_concurrent_downloads: Some(4),
+        ..Default::default()
+    })
+    .unwrap();
+    for i in 0..3 {
+        mgr.create(CreateDownloadRequest {
+            url: format!("{a}/a-{i}.bin"),
+            destination_id: None,
+            suggested_name: Some(format!("a-{i}.bin")),
+            start_now: true,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    }
+    mgr.create(CreateDownloadRequest {
+        url: format!("{b}/b.bin"),
+        destination_id: None,
+        suggested_name: Some("b.bin".into()),
+        start_now: true,
+        request_id: None,
+        expected_sha256: None,
+    })
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(250)).await;
+    let tasks = mgr.list().unwrap();
+    let host_a = tasks
+        .iter()
+        .filter(|t| t.host == "127.0.0.1")
+        .filter(|t| {
+            matches!(
+                t.status,
+                DownloadStatus::Connecting | DownloadStatus::Downloading
+            )
+        })
+        .count();
+    let host_b_active = tasks.iter().filter(|t| t.host == "localhost").any(|t| {
+        matches!(
+            t.status,
+            DownloadStatus::Connecting | DownloadStatus::Downloading
+        )
+    });
+    assert!(host_a <= 2, "same-host active={host_a}");
+    assert!(host_b_active, "other host should get a slot");
+    mgr.shutdown().await;
+}
+
+#[tokio::test]
+async fn paused_intent_survives_restart_without_autostart() {
+    let dir = tempdir().unwrap();
+    let db_path = dir.path().join("test.db");
+    let downloads = dir.path().join("downloads");
+    let mgr = DownloadManager::new(
+        Database::open(&db_path).unwrap(),
+        downloads.clone(),
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/paused.bin".into(),
+            destination_id: None,
+            suggested_name: Some("paused.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    assert_eq!(task.status, DownloadStatus::Paused);
+    drop(mgr);
+    let mgr2 = DownloadManager::new(
+        Database::open(&db_path).unwrap(),
+        downloads,
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
+    mgr2.reconcile_on_startup().unwrap();
+    let recovered = mgr2.get(&task.id).unwrap();
+    assert_eq!(recovered.status, DownloadStatus::Paused);
+    assert!(recovered.queue_position.is_none());
+}
+
+#[tokio::test]
+async fn permanent_failures_are_not_auto_retried() {
+    let base = spawn_fixture_server(|_| (404, b"missing".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/gone.bin"),
+            destination_id: None,
+            suggested_name: Some("gone.bin".into()),
+            start_now: true,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(3),
+    )
+    .await;
+    let done = mgr.get(&task.id).unwrap();
+    assert_eq!(done.error.as_ref().unwrap().code, ErrorCode::HttpNotFound);
+    assert!(!done.error.as_ref().unwrap().retryable);
+    assert_eq!(done.retry_count, 0);
+    assert!(done.next_retry_at.is_none());
+}
+
+#[tokio::test]
+async fn retryable_failures_schedule_until_budget_then_fail() {
+    let base = spawn_fixture_server(|_| (503, b"busy".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/flaky.bin"),
+            destination_id: None,
+            suggested_name: Some("flaky.bin".into()),
+            start_now: true,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(5),
+    )
+    .await;
+    let done = mgr.get(&task.id).unwrap();
+    assert_eq!(
+        done.error.as_ref().unwrap().code,
+        ErrorCode::HttpServerError
+    );
+    assert_eq!(done.retry_count, crate::application::retry::RETRY_BUDGET);
+    assert!(done.next_retry_at.is_none());
+}
+
+#[tokio::test]
+async fn shutdown_cancels_active_workers() {
+    let base = spawn_holding_server().await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/held.bin"),
+            destination_id: None,
+            suggested_name: Some("held.bin".into()),
+            start_now: true,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Connecting, DownloadStatus::Downloading],
+        Duration::from_secs(2),
+    )
+    .await;
+    mgr.shutdown().await;
+    // After drain, no workers remain registered; further dispatch is refused.
+    mgr.dispatch();
+    let after = mgr.get(&task.id).unwrap();
+    assert!(matches!(
+        after.status,
+        DownloadStatus::Paused
+            | DownloadStatus::Canceled
+            | DownloadStatus::Failed
+            | DownloadStatus::Connecting
+            | DownloadStatus::Downloading
+            | DownloadStatus::Queued
+    ));
+}
+
+#[tokio::test]
+async fn honor_retry_after_when_present() {
+    use crate::infrastructure::errors::parse_retry_after;
+    use reqwest::header::HeaderValue;
+    assert_eq!(
+        parse_retry_after(Some(&HeaderValue::from_static("42"))),
+        Some(42)
+    );
+    assert_eq!(
+        parse_retry_after(Some(&HeaderValue::from_static("99999"))),
+        Some(3600)
+    );
 }

@@ -8,6 +8,13 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+const SCHEMA_VERSION: i64 = 3;
+const BUSY_TIMEOUT_MS: i32 = 5000;
+
+type MigrationStep = fn(&rusqlite::Transaction<'_>) -> Result<(), AppError>;
+
+const MIGRATIONS: &[(i64, MigrationStep)] = &[(2, migrate_v2_checksums), (3, migrate_v3_queue)];
+
 #[derive(Clone)]
 pub struct Database {
     conn: Arc<Mutex<Connection>>,
@@ -56,74 +63,134 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<(), AppError> {
-        let mut conn = self.conn.lock();
-        conn.pragma_update(None, "synchronous", "FULL")
-            .map_err(map_db_err)?;
-        conn.execute_batch(
-            r#"
-            CREATE TABLE IF NOT EXISTS schema_migrations (
-              version INTEGER PRIMARY KEY
-            );
-            CREATE TABLE IF NOT EXISTS downloads (
-              id TEXT PRIMARY KEY,
-              url TEXT NOT NULL,
-              file_name TEXT NOT NULL,
-              destination_id TEXT NOT NULL,
-              temp_path TEXT,
-              final_path TEXT,
-              status TEXT NOT NULL,
-              downloaded_bytes INTEGER NOT NULL DEFAULT 0,
-              total_bytes INTEGER,
-              speed_bytes_per_second INTEGER NOT NULL DEFAULT 0,
-              revision INTEGER NOT NULL DEFAULT 0,
-              error_code TEXT,
-              error_message TEXT,
-              error_retryable INTEGER,
-              etag TEXT,
-              last_modified TEXT,
-              request_id TEXT,
-              retry_count INTEGER NOT NULL DEFAULT 0,
-              created_at TEXT NOT NULL,
-              updated_at TEXT NOT NULL
-            );
-            CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_request_id
-              ON downloads(request_id) WHERE request_id IS NOT NULL;
-            CREATE TABLE IF NOT EXISTS settings (
-              id INTEGER PRIMARY KEY CHECK (id = 1),
-              max_concurrent_downloads INTEGER NOT NULL,
-              default_destination_id TEXT NOT NULL,
-              auto_start INTEGER NOT NULL
-            );
-            CREATE TABLE IF NOT EXISTS queues (
-              id TEXT PRIMARY KEY,
-              name TEXT NOT NULL
-            );
-            INSERT OR IGNORE INTO settings (id, max_concurrent_downloads, default_destination_id, auto_start)
-              VALUES (1, 3, 'default', 1);
-            INSERT OR IGNORE INTO queues (id, name) VALUES ('default', 'Default');
-            INSERT OR IGNORE INTO schema_migrations (version) VALUES (1);
-            "#,
-        )
-        .map_err(map_db_err)?;
-        let version: i64 = conn
-            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
-                r.get(0)
-            })
-            .map_err(map_db_err)?;
-        if version < 2 {
-            let transaction = conn.transaction().map_err(map_db_err)?;
-            transaction
-                .execute_batch(
-                    "ALTER TABLE downloads ADD COLUMN expected_sha256 TEXT;
-                ALTER TABLE downloads ADD COLUMN actual_sha256 TEXT;
-                ALTER TABLE downloads ADD COLUMN checksum_result TEXT;
-                ALTER TABLE downloads ADD COLUMN finalization TEXT;
-                INSERT INTO schema_migrations(version) VALUES(2);",
-                )
+        {
+            let conn = self.conn.lock();
+            conn.busy_timeout(std::time::Duration::from_millis(BUSY_TIMEOUT_MS as u64))
                 .map_err(map_db_err)?;
-            transaction.commit().map_err(map_db_err)?;
+            conn.pragma_update(None, "journal_mode", "WAL")
+                .map_err(map_db_err)?;
+            conn.pragma_update(None, "synchronous", "FULL")
+                .map_err(map_db_err)?;
+            conn.execute_batch(BOOTSTRAP_SQL).map_err(map_db_err)?;
+        }
+
+        let version = self.schema_version()?;
+        if version > SCHEMA_VERSION {
+            return Err(AppError::new(
+                ErrorCode::StorageError,
+                format!(
+                    "This database is schema version {version}, newer than this app supports ({SCHEMA_VERSION}). Use a newer Circle Downloader or restore circle-downloader.db.bak."
+                ),
+            ));
+        }
+
+        let pending: Vec<(i64, MigrationStep)> = MIGRATIONS
+            .iter()
+            .copied()
+            .filter(|(v, _)| version < *v)
+            .collect();
+        if pending.is_empty() {
+            return Ok(());
+        }
+
+        if !self.is_memory() {
+            backup_database_file(&self.path)?;
+        }
+
+        for (target, step) in pending {
+            let result = {
+                let mut conn = self.conn.lock();
+                let tx = conn.transaction().map_err(map_db_err)?;
+                match step(&tx) {
+                    Ok(()) => {
+                        tx.execute(
+                            "INSERT INTO schema_migrations(version) VALUES(?1)",
+                            params![target],
+                        )
+                        .map_err(map_db_err)?;
+                        tx.commit().map_err(map_db_err)?;
+                        Ok(())
+                    }
+                    Err(error) => Err(error),
+                }
+            };
+            if let Err(error) = result {
+                if !self.is_memory() {
+                    let _ = restore_database_file(&self.path);
+                }
+                return Err(AppError::new(
+                    ErrorCode::StorageError,
+                    format!(
+                        "Database upgrade to version {target} failed. Restore circle-downloader.db.bak if the app will not open. ({})",
+                        error.message
+                    ),
+                ));
+            }
         }
         Ok(())
+    }
+
+    fn is_memory(&self) -> bool {
+        self.path == Path::new(":memory:")
+    }
+
+    fn schema_version(&self) -> Result<i64, AppError> {
+        let conn = self.conn.lock();
+        conn.query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+            r.get(0)
+        })
+        .map_err(map_db_err)
+    }
+
+    pub fn next_queue_position(&self, queue_id: &str) -> Result<i64, AppError> {
+        let conn = self.conn.lock();
+        let max: Option<i64> = conn
+            .query_row(
+                "SELECT MAX(queue_position) FROM downloads WHERE queue_id = ?1",
+                params![queue_id],
+                |row| row.get(0),
+            )
+            .map_err(map_db_err)?;
+        Ok(max.unwrap_or(0).saturating_add(1))
+    }
+
+    pub fn list_runnable_queued(&self, now: DateTime<Utc>) -> Result<Vec<DownloadTask>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
+                        downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
+                        error_code, error_message, error_retryable, etag, last_modified,
+                        request_id, retry_count, created_at, updated_at, expected_sha256,
+                        actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                        host, next_retry_at
+                 FROM downloads
+                 WHERE status = 'queued'
+                   AND (next_retry_at IS NULL OR next_retry_at <= ?1)
+                 ORDER BY queue_position ASC NULLS LAST, created_at ASC",
+            )
+            .map_err(map_db_err)?;
+        let rows = stmt
+            .query_map(params![now.to_rfc3339()], map_task_row)
+            .map_err(map_db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
+    pub fn earliest_retry_at(&self) -> Result<Option<DateTime<Utc>>, AppError> {
+        let conn = self.conn.lock();
+        let value: Option<String> = conn
+            .query_row(
+                "SELECT MIN(next_retry_at) FROM downloads
+                 WHERE status = 'queued' AND next_retry_at IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(map_db_err)?
+            .flatten();
+        value.map(|v| parse_dt(&v).map_err(map_db_err)).transpose()
     }
 
     pub fn list_downloads(&self) -> Result<Vec<DownloadTask>, AppError> {
@@ -133,7 +200,9 @@ impl Database {
                 "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                         downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                         error_code, error_message, error_retryable, etag, last_modified,
-                        request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
+                        request_id, retry_count, created_at, updated_at, expected_sha256,
+                        actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                        host, next_retry_at
                  FROM downloads ORDER BY created_at ASC",
             )
             .map_err(map_db_err)?;
@@ -151,7 +220,9 @@ impl Database {
             "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                     downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                     error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
+                    request_id, retry_count, created_at, updated_at, expected_sha256,
+                    actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                    host, next_retry_at
              FROM downloads WHERE id = ?1",
             params![id],
             map_task_row,
@@ -167,7 +238,9 @@ impl Database {
             "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                     downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                     error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
+                    request_id, retry_count, created_at, updated_at, expected_sha256,
+                    actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                    host, next_retry_at
              FROM downloads WHERE request_id = ?1",
             params![request_id],
             map_task_row,
@@ -191,8 +264,10 @@ impl Database {
                 id, url, file_name, destination_id, temp_path, final_path, status,
                 downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                 error_code, error_message, error_retryable, etag, last_modified,
-                request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
+                request_id, retry_count, created_at, updated_at, expected_sha256,
+                actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                host, next_retry_at
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
              ON CONFLICT(id) DO UPDATE SET
                 url=excluded.url,
                 file_name=excluded.file_name,
@@ -212,8 +287,14 @@ impl Database {
                 request_id=excluded.request_id,
                 retry_count=excluded.retry_count,
                 updated_at=excluded.updated_at,
-                expected_sha256=excluded.expected_sha256, actual_sha256=excluded.actual_sha256,
-                checksum_result=excluded.checksum_result, finalization=excluded.finalization",
+                expected_sha256=excluded.expected_sha256,
+                actual_sha256=excluded.actual_sha256,
+                checksum_result=excluded.checksum_result,
+                finalization=excluded.finalization,
+                queue_id=excluded.queue_id,
+                queue_position=excluded.queue_position,
+                host=excluded.host,
+                next_retry_at=excluded.next_retry_at",
             params![
                 task.id,
                 task.url,
@@ -235,7 +316,14 @@ impl Database {
                 task.retry_count as i64,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
-                task.expected_sha256, task.actual_sha256, task.checksum_result, task.finalization,
+                task.expected_sha256,
+                task.actual_sha256,
+                task.checksum_result,
+                task.finalization,
+                task.queue_id,
+                task.queue_position,
+                task.host,
+                task.next_retry_at.map(|dt| dt.to_rfc3339()),
             ],
         )
         .map_err(map_db_err)?;
@@ -313,7 +401,9 @@ impl Database {
         let mut stmt = conn
             .prepare(
                 "SELECT q.id, q.name,
-                        (SELECT COUNT(*) FROM downloads d WHERE d.status NOT IN ('completed','canceled')) as task_count
+                        (SELECT COUNT(*) FROM downloads d
+                         WHERE d.queue_id = q.id
+                           AND d.status NOT IN ('completed','canceled')) as task_count
                  FROM queues q ORDER BY q.id",
             )
             .map_err(map_db_err)?;
@@ -332,13 +422,107 @@ impl Database {
     }
 }
 
-fn map_db_err(err: rusqlite::Error) -> AppError {
+const BOOTSTRAP_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY
+);
+CREATE TABLE IF NOT EXISTS downloads (
+  id TEXT PRIMARY KEY,
+  url TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  destination_id TEXT NOT NULL,
+  temp_path TEXT,
+  final_path TEXT,
+  status TEXT NOT NULL,
+  downloaded_bytes INTEGER NOT NULL DEFAULT 0,
+  total_bytes INTEGER,
+  speed_bytes_per_second INTEGER NOT NULL DEFAULT 0,
+  revision INTEGER NOT NULL DEFAULT 0,
+  error_code TEXT,
+  error_message TEXT,
+  error_retryable INTEGER,
+  etag TEXT,
+  last_modified TEXT,
+  request_id TEXT,
+  retry_count INTEGER NOT NULL DEFAULT 0,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_downloads_request_id
+  ON downloads(request_id) WHERE request_id IS NOT NULL;
+CREATE TABLE IF NOT EXISTS settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  max_concurrent_downloads INTEGER NOT NULL,
+  default_destination_id TEXT NOT NULL,
+  auto_start INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS queues (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL
+);
+INSERT OR IGNORE INTO settings (id, max_concurrent_downloads, default_destination_id, auto_start)
+  VALUES (1, 3, 'default', 1);
+INSERT OR IGNORE INTO queues (id, name) VALUES ('default', 'Default');
+INSERT OR IGNORE INTO schema_migrations (version) VALUES (1);
+"#;
+
+fn migrate_v2_checksums(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "ALTER TABLE downloads ADD COLUMN expected_sha256 TEXT;
+         ALTER TABLE downloads ADD COLUMN actual_sha256 TEXT;
+         ALTER TABLE downloads ADD COLUMN checksum_result TEXT;
+         ALTER TABLE downloads ADD COLUMN finalization TEXT;",
+    )
+    .map_err(map_db_err)
+}
+
+fn migrate_v3_queue(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "ALTER TABLE downloads ADD COLUMN queue_id TEXT NOT NULL DEFAULT 'default';
+         ALTER TABLE downloads ADD COLUMN queue_position INTEGER;
+         ALTER TABLE downloads ADD COLUMN host TEXT NOT NULL DEFAULT 'unknown';
+         ALTER TABLE downloads ADD COLUMN next_retry_at TEXT;
+         CREATE INDEX IF NOT EXISTS idx_downloads_queue_order
+           ON downloads(queue_id, queue_position);",
+    )
+    .map_err(map_db_err)
+}
+
+pub fn backup_path(db_path: &Path) -> PathBuf {
+    let mut bak = db_path.as_os_str().to_owned();
+    bak.push(".bak");
+    PathBuf::from(bak)
+}
+
+fn backup_database_file(db_path: &Path) -> Result<(), AppError> {
+    if !db_path.exists() {
+        return Ok(());
+    }
+    let bak = backup_path(db_path);
+    std::fs::copy(db_path, &bak).map_err(crate::infrastructure::errors::map_io_err)?;
+    Ok(())
+}
+
+fn restore_database_file(db_path: &Path) -> Result<(), AppError> {
+    let bak = backup_path(db_path);
+    if !bak.exists() {
+        return Err(AppError::new(
+            ErrorCode::StorageNotFound,
+            "No database backup is available to restore.",
+        ));
+    }
+    std::fs::copy(&bak, db_path).map_err(crate::infrastructure::errors::map_io_err)?;
+    Ok(())
+}
+
+pub fn map_db_err(err: rusqlite::Error) -> AppError {
     let code = match &err {
         rusqlite::Error::SqliteFailure(error, _) => match error.code {
             rusqlite::ErrorCode::DiskFull => ErrorCode::DiskFull,
             rusqlite::ErrorCode::PermissionDenied | rusqlite::ErrorCode::ReadOnly => {
                 ErrorCode::StoragePermission
             }
+            rusqlite::ErrorCode::ConstraintViolation => ErrorCode::AlreadyExists,
             _ => ErrorCode::StorageError,
         },
         _ => ErrorCode::StorageError,
@@ -347,6 +531,11 @@ fn map_db_err(err: rusqlite::Error) -> AppError {
         code,
         "The download database could not be read or updated. Check disk space and data-folder permissions, then reopen the app.",
     )
+}
+
+pub fn is_unique_constraint(err: &AppError) -> bool {
+    err.code == ErrorCode::AlreadyExists
+        && err.message.contains("download database could not be read")
 }
 
 fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
@@ -363,6 +552,10 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
     };
     let created_at = parse_dt(&row.get::<_, String>(18)?)?;
     let updated_at = parse_dt(&row.get::<_, String>(19)?)?;
+    let next_retry_at = row
+        .get::<_, Option<String>>(27)?
+        .map(|v| parse_dt(&v))
+        .transpose()?;
     Ok(DownloadTask {
         id: row.get(0)?,
         url: row.get(1)?,
@@ -384,6 +577,14 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
         actual_sha256: row.get(21)?,
         checksum_result: row.get(22)?,
         finalization: row.get(23)?,
+        queue_id: row
+            .get::<_, Option<String>>(24)?
+            .unwrap_or_else(|| "default".into()),
+        queue_position: row.get(25)?,
+        host: row
+            .get::<_, Option<String>>(26)?
+            .unwrap_or_else(|| "unknown".into()),
+        next_retry_at,
         created_at,
         updated_at,
     })
@@ -404,20 +605,10 @@ mod tests {
     use super::*;
     use chrono::Utc;
 
-    #[test]
-    fn persists_settings_and_downloads() {
-        let db = Database::open_in_memory().unwrap();
-        let settings = db
-            .update_settings(UpdateSettingsRequest {
-                max_concurrent_downloads: Some(5),
-                ..Default::default()
-            })
-            .unwrap();
-        assert_eq!(settings.max_concurrent_downloads, 5);
-
+    pub(super) fn sample_task(id: &str) -> DownloadTask {
         let now = Utc::now();
-        let task = DownloadTask {
-            id: "t1".into(),
+        DownloadTask {
+            id: id.into(),
             url: "https://example.com/a".into(),
             file_name: "a.bin".into(),
             destination_id: "default".into(),
@@ -439,10 +630,29 @@ mod tests {
             actual_sha256: None,
             checksum_result: None,
             finalization: None,
-        };
+            next_retry_at: None,
+            queue_id: "default".into(),
+            queue_position: Some(1),
+            host: "example.com".into(),
+        }
+    }
+
+    #[test]
+    fn persists_settings_and_downloads() {
+        let db = Database::open_in_memory().unwrap();
+        let settings = db
+            .update_settings(UpdateSettingsRequest {
+                max_concurrent_downloads: Some(5),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(settings.max_concurrent_downloads, 5);
+
+        let task = sample_task("t1");
         db.upsert_download(&task).unwrap();
         assert_eq!(db.list_downloads().unwrap().len(), 1);
         assert_eq!(db.get_download("t1").unwrap().file_name, "a.bin");
+        assert_eq!(db.get_download("t1").unwrap().host, "example.com");
         assert_eq!(db.list_queues().unwrap()[0].task_count, 1);
     }
 }
@@ -462,30 +672,98 @@ mod error_contract_tests {
 #[cfg(test)]
 mod migration_tests {
     use super::*;
+
     #[test]
-    fn existing_v1_rows_survive_transactional_checksum_upgrade_and_reopen() {
+    fn existing_v1_rows_survive_ordered_upgrades_through_v3_and_reopen() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("old.db");
         let db = Database::open(&path).unwrap();
         // Restore precisely the v1 column/version shape, then open via the real migration.
-        db.conn.lock().execute_batch("ALTER TABLE downloads DROP COLUMN expected_sha256;
-            ALTER TABLE downloads DROP COLUMN actual_sha256; ALTER TABLE downloads DROP COLUMN checksum_result;
-            ALTER TABLE downloads DROP COLUMN finalization; DELETE FROM schema_migrations WHERE version=2;
+        db.conn.lock().execute_batch(
+            "DROP INDEX IF EXISTS idx_downloads_queue_order;
+            ALTER TABLE downloads DROP COLUMN expected_sha256;
+            ALTER TABLE downloads DROP COLUMN actual_sha256;
+            ALTER TABLE downloads DROP COLUMN checksum_result;
+            ALTER TABLE downloads DROP COLUMN finalization;
+            ALTER TABLE downloads DROP COLUMN queue_id;
+            ALTER TABLE downloads DROP COLUMN queue_position;
+            ALTER TABLE downloads DROP COLUMN host;
+            ALTER TABLE downloads DROP COLUMN next_retry_at;
+            DELETE FROM schema_migrations WHERE version>=2;
             INSERT INTO downloads(id,url,file_name,destination_id,status,created_at,updated_at)
-            VALUES('legacy','https://example.com/file','file','default','paused','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');").unwrap();
+            VALUES('legacy','https://example.com/file','file','default','paused','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');",
+        ).unwrap();
         drop(db);
         for _ in 0..2 {
             let db = Database::open(&path).unwrap();
+            assert_eq!(db.schema_version().unwrap(), 3);
             let task = db.get_download("legacy").unwrap();
             assert_eq!(task.file_name, "file");
             assert!(task.actual_sha256.is_none());
-            assert!(task.checksum_result.is_none());
+            assert_eq!(task.queue_id, "default");
+            assert_eq!(task.host, "unknown");
             let sync: i64 = db
                 .conn
                 .lock()
                 .query_row("PRAGMA synchronous", [], |row| row.get(0))
                 .unwrap();
             assert_eq!(sync, 2);
+            let journal: String = db
+                .conn
+                .lock()
+                .query_row("PRAGMA journal_mode", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(journal.to_lowercase(), "wal");
         }
+        assert!(backup_path(&path).exists());
+    }
+
+    #[test]
+    fn backup_and_restore_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.db");
+        {
+            let db = Database::open(&path).unwrap();
+            db.upsert_download(&tests::sample_task("keep")).unwrap();
+        }
+        backup_database_file(&path).unwrap();
+        std::fs::write(&path, b"corrupt").unwrap();
+        restore_database_file(&path).unwrap();
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.get_download("keep").unwrap().file_name, "a.bin");
+    }
+
+    #[test]
+    fn refuses_newer_schema_version() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("future.db");
+        {
+            let db = Database::open(&path).unwrap();
+            db.conn
+                .lock()
+                .execute(
+                    "INSERT INTO schema_migrations(version) VALUES(?1)",
+                    params![SCHEMA_VERSION + 1],
+                )
+                .unwrap();
+        }
+        let Err(err) = Database::open(&path) else {
+            panic!("expected schema refusal");
+        };
+        assert_eq!(err.code, ErrorCode::StorageError);
+        assert!(err.message.contains("newer than this app supports"));
+    }
+
+    #[test]
+    fn wal_busy_timeout_allows_contended_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("busy.db");
+        let db_a = Database::open(&path).unwrap();
+        let db_b = Database::open(&path).unwrap();
+        db_a.upsert_download(&tests::sample_task("a")).unwrap();
+        let mut task_b = tests::sample_task("b");
+        task_b.request_id = Some("req-b".into());
+        db_b.upsert_download(&task_b).unwrap();
+        assert_eq!(db_a.list_downloads().unwrap().len(), 2);
     }
 }

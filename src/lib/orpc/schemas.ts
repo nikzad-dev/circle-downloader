@@ -69,6 +69,8 @@ export const downloadTaskSchema = z.object({
   expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
   actualSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
   checksumResult: z.enum(['computed', 'matched', 'mismatch']).nullable().default(null),
+  retryCount: z.number().int().nonnegative(),
+  nextRetryAt: z.string().min(1).nullable(),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 })

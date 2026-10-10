@@ -43,8 +43,14 @@ pub struct DownloadTask {
     pub last_modified: Option<String>,
     #[serde(skip)]
     pub request_id: Option<String>,
-    #[serde(skip)]
     pub retry_count: u32,
+    pub next_retry_at: Option<DateTime<Utc>>,
+    #[serde(skip)]
+    pub queue_id: String,
+    #[serde(skip)]
+    pub queue_position: Option<i64>,
+    #[serde(skip)]
+    pub host: String,
 }
 
 impl DownloadTask {

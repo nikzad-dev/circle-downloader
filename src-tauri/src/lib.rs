@@ -9,6 +9,10 @@ use infrastructure::db::Database;
 use infrastructure::ownership::DataDirectoryLease;
 use ipc::progress::ProgressHub;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::menu::{Menu, MenuItem};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Manager, RunEvent, WindowEvent};
 
 pub struct AppState {
     pub manager: DownloadManager,
@@ -47,8 +51,46 @@ pub fn run() {
         }
     };
 
+    let allow_exit = std::sync::Arc::new(AtomicBool::new(false));
+    let allow_exit_setup = allow_exit.clone();
+
     tauri::Builder::default()
         .manage(state)
+        .setup(move |app| {
+            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
+            let menu = Menu::with_items(app, &[&show, &quit])?;
+            let icon = app
+                .default_window_icon()
+                .cloned()
+                .ok_or("missing window icon")?;
+            let _tray = TrayIconBuilder::new()
+                .icon(icon)
+                .menu(&menu)
+                .tooltip("Circle Downloader")
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => {
+                        if let Some(window) = app.get_webview_window("main") {
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        }
+                    }
+                    "quit" => {
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .build(app)?;
+            let _ = allow_exit_setup;
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                // Hide-to-tray: closing the window must not kill transfers.
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             commands::system::health_check,
             commands::downloads::list_downloads,
@@ -65,8 +107,35 @@ pub fn run() {
             commands::settings::update_settings,
             commands::queues::list_queues,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Circle Downloader");
+        .build(tauri::generate_context!())
+        .expect("error while building Circle Downloader")
+        .run(move |app, event| match &event {
+            RunEvent::ExitRequested { api, .. } => {
+                if allow_exit.load(Ordering::SeqCst) {
+                    return;
+                }
+                api.prevent_exit();
+                let handle = app.clone();
+                let allow_exit = allow_exit.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    state.manager.shutdown().await;
+                    allow_exit.store(true, Ordering::SeqCst);
+                    handle.exit(0);
+                });
+            }
+            #[cfg(target_os = "macos")]
+            RunEvent::Reopen {
+                has_visible_windows,
+                ..
+            } => {
+                if !*has_visible_windows && let Some(window) = app.get_webview_window("main") {
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+            _ => {}
+        });
 }
 
 #[cfg(test)]

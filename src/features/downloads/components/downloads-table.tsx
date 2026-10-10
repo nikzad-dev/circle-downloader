@@ -23,6 +23,17 @@ const columns = [
             <code className="block break-all select-all">{row.original.actualSha256}</code>
           </div>
         )}
+        {row.original.status === 'queued' && row.original.nextRetryAt !== null && (
+          <p className="mt-2 max-w-64 text-xs leading-relaxed whitespace-normal text-muted-foreground">
+            Retrying at
+            {' '}
+            {new Date(row.original.nextRetryAt).toLocaleString()}
+            {row.original.retryCount > 0 ? ` · attempt ${row.original.retryCount} of 5` : ''}
+          </p>
+        )}
+        {row.original.status === 'queued' && row.original.nextRetryAt === null && row.original.retryCount === 0 && (
+          <p className="mt-2 max-w-64 text-xs text-muted-foreground">Waiting for a free download slot</p>
+        )}
         {row.original.error && <p className="mt-2 max-w-64 text-xs leading-relaxed whitespace-normal text-destructive">{downloadErrorMessage(row.original.error)}</p>}
       </div>
     </div>

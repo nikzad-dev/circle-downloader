@@ -1,4 +1,5 @@
 use crate::domain::{AppError, ErrorCode};
+use chrono::DateTime;
 use reqwest::StatusCode;
 use std::error::Error;
 use std::io;
@@ -85,7 +86,10 @@ pub fn network_deadline(message: &'static str) -> AppError {
     AppError::new(ErrorCode::NetworkTimeout, message)
 }
 
-pub fn http_status_error(status: StatusCode) -> AppError {
+pub fn http_status_error_with_retry_after(
+    status: StatusCode,
+    retry_after: Option<&reqwest::header::HeaderValue>,
+) -> AppError {
     let (code, action) = match status {
         StatusCode::UNAUTHORIZED => (
             ErrorCode::HttpUnauthorized,
@@ -125,6 +129,26 @@ pub fn http_status_error(status: StatusCode) -> AppError {
         ),
     };
     AppError::new(code, format!("HTTP {}: {action}", status.as_u16()))
+        .with_retry_after(parse_retry_after(retry_after))
+}
+
+pub fn parse_retry_after(value: Option<&reqwest::header::HeaderValue>) -> Option<u64> {
+    let raw = value?.to_str().ok()?.trim();
+    if let Ok(secs) = raw.parse::<u64>() {
+        return Some(secs.min(3600));
+    }
+    DateTime::parse_from_rfc2822(raw)
+        .ok()
+        .map(|dt| {
+            let now = chrono::Utc::now();
+            let target = dt.with_timezone(&chrono::Utc);
+            if target <= now {
+                0
+            } else {
+                (target - now).num_seconds().max(0) as u64
+            }
+        })
+        .map(|secs| secs.min(3600))
 }
 
 pub fn map_io_err(error: io::Error) -> AppError {

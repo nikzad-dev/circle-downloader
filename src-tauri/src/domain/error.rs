@@ -120,6 +120,9 @@ pub struct AppError {
     pub code: ErrorCode,
     pub message: String,
     pub retryable: bool,
+    /// Seconds from Retry-After; never serialized to IPC.
+    #[serde(skip)]
+    pub retry_after_secs: Option<u64>,
 }
 
 impl AppError {
@@ -128,7 +131,13 @@ impl AppError {
             retryable: code.retryable(),
             code,
             message: message.into(),
+            retry_after_secs: None,
         }
+    }
+
+    pub fn with_retry_after(mut self, secs: Option<u64>) -> Self {
+        self.retry_after_secs = secs;
+        self
     }
 
     pub fn to_ipc_string(&self) -> String {

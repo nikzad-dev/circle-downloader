@@ -35,6 +35,10 @@ fn serialized_ipc_matches_the_shared_frontend_contract() {
         actual_sha256: None,
         checksum_result: None,
         finalization: None,
+        next_retry_at: None,
+        queue_id: "default".into(),
+        queue_position: None,
+        host: "example.com".into(),
     };
     let payload = json!({
         "task": task,
