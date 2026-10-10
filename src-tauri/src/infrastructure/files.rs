@@ -102,6 +102,7 @@ impl ManagedFiles {
         file.seek(SeekFrom::Start(offset)).map_err(map_io_err)?;
         Ok(file)
     }
+
     pub fn length(&self, name: &Path) -> Result<Option<u64>, AppError> {
         match self.open(name, false, false) {
             Ok(file) => Ok(Some(file.metadata().map_err(map_io_err)?.len())),

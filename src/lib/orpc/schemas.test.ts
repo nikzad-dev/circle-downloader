@@ -109,7 +109,14 @@ describe('settingsSchema', () => {
         maxConcurrentDownloads: 3,
         defaultDestinationId: 'default',
         autoStart: true,
+        maxConnectionsPerDownload: 1,
       }),
-    ).toMatchObject({ maxConcurrentDownloads: 3 })
+    ).toMatchObject({ maxConcurrentDownloads: 3, maxConnectionsPerDownload: 1 })
+  })
+})
+
+describe('connection setting bounds', () => {
+  it.each([0, 5, 1.5, -1])('rejects invalid connection count %s', (value) => {
+    expect(() => settingsSchema.parse({ maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: value })).toThrow()
   })
 })

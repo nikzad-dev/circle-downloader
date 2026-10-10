@@ -13,14 +13,14 @@ A local desktop download manager built with Tauri, Rust, React and shadcn/ui. Ru
 - Task details Sheet via `/downloads/$downloadId` (redacted source, retries, verification).
 - Pause, resume, cancel, manual retry, Open/Reveal and removal confirmation.
 - Native folder grants (opaque IDs) plus the always-available app-managed default folder.
-- Settings: appearance, auto-start, concurrency, default destination; retries/host caps are read-only.
+- Settings: appearance, auto-start, task concurrency, optional connections per download and default destination; retries/host caps are read-only.
 - Global shortcuts: ⌘/Ctrl+N Add download; ⌘/Ctrl+V pastes a URL into Add when focus is not in an editable field.
 - SQLite task/settings/destination persistence, exclusive process ownership and verified publication recovery.
 - Retained SHA-256 digests with optional expected-checksum comparison.
 - Rust-enforced public HTTPS, safe redirect/DNS policy and anchored no-follow file operations.
 - Light, Dark and System appearance using the existing neutral/lime shadcn theme.
 
-The app uses a single connection per transfer. Segmentation, browser integration and full cross-platform release QA remain planned.
+Downloads use one connection by default. Settings can opt into 2–4 connections for compatible files of at least 8 MiB; incompatible origins fall back to one connection. Browser integration and full cross-platform release QA remain planned.
 
 ## Development setup
 
@@ -62,7 +62,7 @@ Reuse that directory to test persistence across restarts. On Windows, set the sa
 4. Follow progress in **Downloads**. Use search, status and sort controls; select rows for bulk Pause/Resume/Retry/Cancel/Remove. Open a row (or deep-link `/downloads/$id`) for details. Failed tasks offer manual **Retry**. Completed tasks offer **Open** and **Reveal**.
 5. Choose **Remove** to remove a record. The confirmation offers partial-file deletion for unfinished tasks, enabled by default. Completed files remain on disk.
 
-Appearance, auto-start, concurrency (1–32) and the default destination are editable in Settings. Approve extra folders there; Circle never replaces an existing file when naming collisions occur. Automatic retries (up to 5) and the per-host limit (2) are shown read-only.
+Appearance, auto-start, task concurrency (1–32), connections per download (1–4) and the default destination are editable in Settings. Connection changes apply when a transfer starts or resumes; existing single-connection partials keep their original mode, and existing segment plans resume with the current connection cap. Approve extra folders there; Circle never replaces an existing file when naming collisions occur. Automatic retries (up to 5) and the per-host limit (2) are shown read-only.
 
 ### Where files and history live
 
@@ -96,7 +96,7 @@ bun run clippy:rust
 
 `build` runs TypeScript and creates the production frontend. `test` runs Vitest's Node and jsdom projects; `test:rust` runs native tests, including controlled localhost HTTP fixtures and temporary files. The Unix TLS test fixture also needs the `openssl` command to generate a temporary self-signed certificate; production TLS uses Rustls and does not need that command. Restricted sandboxes must permit fixture socket binding and subprocess execution. Use `bun run test`, not `bun test`, for this suite. `bun run test:watch` enables frontend watch mode.
 
-The 2026-10-11 N3 local checks passed frontend Vitest suites and **89 Rust lib tests**, plus typecheck, formatting and strict Clippy. One ignored Rust test is a subprocess fixture explicitly invoked by the process-ownership tests. See the [N3 everyday UI verification](docs/verification/N3_EVERYDAY_UI_2026-10-11.md), [N2 durable queue verification](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md), [ownership/error verification](docs/verification/N1_OWNERSHIP_ERRORS_2026-10-11.md) and [checksum/recovery/security verification](docs/verification/N1_CHECKSUM_RECOVERY_SECURITY_2026-10-11.md). Full accessibility and Windows/Linux release QA remain pending.
+The 2026-10-11 N4a local checks passed **97 frontend tests** and **107 Rust tests**, plus lint, typecheck, production build, Rust formatting and strict Clippy. Two Rust tests are ignored by the ordinary suite: the ownership subprocess fixture invoked by its parent tests, and the controlled segmentation benchmark run separately. A macOS native debug smoke completed an 8 MiB segmented transfer with a matching expected SHA-256 and cleaned checkpoints/partials. See the [N4a decisions, tests and measured benchmark](docs/verification/N4A_SEGMENTATION_2026-10-11.md), [N3 everyday UI verification](docs/verification/N3_EVERYDAY_UI_2026-10-11.md), [N2 durable queue verification](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md), [ownership/error verification](docs/verification/N1_OWNERSHIP_ERRORS_2026-10-11.md) and [checksum/recovery/security verification](docs/verification/N1_CHECKSUM_RECOVERY_SECURITY_2026-10-11.md). Full accessibility and Windows/Linux release QA remain pending.
 
 ### Native builds
 
@@ -142,7 +142,7 @@ Environment/system proxy use is disabled so the native address checks cannot be 
 
 HTTP, TLS, connection and storage failures have structured codes and actionable UI messages without exposing signed URLs or internal paths. Certificate failures require correcting the clock or server TLS configuration; certificate validation remains enabled. Transient connection/server/storage failures are marked retryable and auto-scheduled up to five attempts with exponential backoff/jitter (and Retry-After when present); permanent failures are not auto-retried. Scheduled retries expose `retryCount` and `nextRetryAt`.
 
-Configured concurrency is enforced globally (settings 1–32) with a per-host fairness cap of two. Queue membership and order are durable. Approved destination folders are opaque grants resolved only in Rust; writes stay no-follow and never replace an existing final file. Publication uses a synced partial and durable ready/cleanup checkpoints; startup verifies recorded digests and reconciles partial/final files. Full-file hashing uses a bounded 64 KiB buffer; digests and expected-checksum results are retained. Startup rehashing can take time with a large history. Downloads virtualizes at 100+ filtered rows; Home stays capped. Windows directory-entry power-loss durability, Windows/Linux tray smoke and cross-platform release checks remain pending. See the [N3 verification record](docs/verification/N3_EVERYDAY_UI_2026-10-11.md) and [N2 verification record](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md). Remote macOS CI passed for commit `d63fd61`; see the [remote CI verification](docs/verification/REMOTE_CI_2026-10-11.md).
+Configured task concurrency is enforced globally (settings 1–32) with a per-host task fairness cap of two. Each segmented task still occupies one task slot and can use up to four connections internally; the host cap counts tasks, not connections. Segmented assembly streams through a bounded buffer, verifies contiguous coverage and hashes the complete file before publication. Separate segments plus the assembled partial temporarily require about twice the file size on disk. Queue membership and order are durable. Approved destination folders are opaque grants resolved only in Rust; writes stay no-follow and never replace an existing final file. Publication uses a synced partial and durable ready/cleanup checkpoints; startup verifies recorded digests and reconciles partial/final files. Full-file hashing uses a bounded 64 KiB buffer; digests and expected-checksum results are retained. Startup rehashing can take time with a large history. Downloads virtualizes at 100+ filtered rows; Home stays capped. Windows directory-entry power-loss durability, Windows/Linux tray smoke and cross-platform release checks remain pending. See the [N3 verification record](docs/verification/N3_EVERYDAY_UI_2026-10-11.md) and [N2 verification record](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md). Remote macOS CI passed for commit `d63fd61`; the current N4a changes have not been verified remotely. See the [remote CI verification](docs/verification/REMOTE_CI_2026-10-11.md).
 
 Follow [ROADMAP.md](ROADMAP.md) for the ordered work: quality baseline, transfer correctness, durable scheduling/recovery, everyday UI, advanced features and supported releases. The [archived UI checklist](docs/archive/MVP_UI_ROADMAP_2026-10-10.md) retains implementation and native smoke evidence.
 

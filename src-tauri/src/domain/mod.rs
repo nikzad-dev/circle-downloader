@@ -8,6 +8,7 @@ pub mod url_policy;
 pub use error::{AppError, ErrorCode};
 pub use status::DownloadStatus;
 pub use task::{
-    CreateDownloadRequest, Destination, DownloadTask, GrantDestinationRequest, ProgressEvent,
-    Queue, RemoveDownloadRequest, RemoveDownloadResult, Settings, TaskError, UpdateSettingsRequest,
+    CreateDownloadRequest, Destination, DownloadSegment, DownloadTask, GrantDestinationRequest,
+    ProgressEvent, Queue, RemoveDownloadRequest, RemoveDownloadResult, SegmentStatus, Settings,
+    TaskError, TransferMode, UpdateSettingsRequest,
 };

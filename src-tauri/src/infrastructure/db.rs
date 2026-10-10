@@ -1,6 +1,6 @@
 use crate::domain::{
-    AppError, DownloadStatus, DownloadTask, ErrorCode, Queue, Settings, TaskError,
-    UpdateSettingsRequest,
+    AppError, DownloadSegment, DownloadStatus, DownloadTask, ErrorCode, Queue, SegmentStatus,
+    Settings, TaskError, TransferMode, UpdateSettingsRequest,
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SCHEMA_VERSION: i64 = 4;
+const SCHEMA_VERSION: i64 = 5;
 const BUSY_TIMEOUT_MS: i32 = 5000;
 
 type MigrationStep = fn(&rusqlite::Transaction<'_>) -> Result<(), AppError>;
@@ -17,7 +17,17 @@ const MIGRATIONS: &[(i64, MigrationStep)] = &[
     (2, migrate_v2_checksums),
     (3, migrate_v3_queue),
     (4, migrate_v4_destinations),
+    (5, migrate_v5_segmentation),
 ];
+
+const DOWNLOAD_SELECT: &str =
+    "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
+                        downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
+                        error_code, error_message, error_retryable, etag, last_modified,
+                        request_id, retry_count, created_at, updated_at, expected_sha256,
+                        actual_sha256, checksum_result, finalization, queue_id, queue_position,
+                        host, next_retry_at, transfer_mode
+                 FROM downloads";
 
 #[derive(Clone)]
 pub struct Database {
@@ -160,20 +170,13 @@ impl Database {
 
     pub fn list_runnable_queued(&self, now: DateTime<Utc>) -> Result<Vec<DownloadTask>, AppError> {
         let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
-                        downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
-                        error_code, error_message, error_retryable, etag, last_modified,
-                        request_id, retry_count, created_at, updated_at, expected_sha256,
-                        actual_sha256, checksum_result, finalization, queue_id, queue_position,
-                        host, next_retry_at
-                 FROM downloads
+        let sql = format!(
+            "{DOWNLOAD_SELECT}
                  WHERE status = 'queued'
                    AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-                 ORDER BY queue_position ASC NULLS LAST, created_at ASC",
-            )
-            .map_err(map_db_err)?;
+                 ORDER BY queue_position ASC NULLS LAST, created_at ASC"
+        );
+        let mut stmt = conn.prepare(&sql).map_err(map_db_err)?;
         let rows = stmt
             .query_map(params![now.to_rfc3339()], map_task_row)
             .map_err(map_db_err)?
@@ -199,17 +202,8 @@ impl Database {
 
     pub fn list_downloads(&self) -> Result<Vec<DownloadTask>, AppError> {
         let conn = self.conn.lock();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
-                        downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
-                        error_code, error_message, error_retryable, etag, last_modified,
-                        request_id, retry_count, created_at, updated_at, expected_sha256,
-                        actual_sha256, checksum_result, finalization, queue_id, queue_position,
-                        host, next_retry_at
-                 FROM downloads ORDER BY created_at ASC",
-            )
-            .map_err(map_db_err)?;
+        let sql = format!("{DOWNLOAD_SELECT} ORDER BY created_at ASC");
+        let mut stmt = conn.prepare(&sql).map_err(map_db_err)?;
         let rows = stmt
             .query_map([], map_task_row)
             .map_err(map_db_err)?
@@ -220,37 +214,21 @@ impl Database {
 
     pub fn get_download(&self, id: &str) -> Result<DownloadTask, AppError> {
         let conn = self.conn.lock();
-        conn.query_row(
-            "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
-                    downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
-                    error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at, expected_sha256,
-                    actual_sha256, checksum_result, finalization, queue_id, queue_position,
-                    host, next_retry_at
-             FROM downloads WHERE id = ?1",
-            params![id],
-            map_task_row,
-        )
-        .optional()
-        .map_err(map_db_err)?
-        .ok_or_else(|| AppError::new(ErrorCode::TaskNotFound, format!("Download not found: {id}")))
+        let sql = format!("{DOWNLOAD_SELECT} WHERE id = ?1");
+        conn.query_row(&sql, params![id], map_task_row)
+            .optional()
+            .map_err(map_db_err)?
+            .ok_or_else(|| {
+                AppError::new(ErrorCode::TaskNotFound, format!("Download not found: {id}"))
+            })
     }
 
     pub fn find_by_request_id(&self, request_id: &str) -> Result<Option<DownloadTask>, AppError> {
         let conn = self.conn.lock();
-        conn.query_row(
-            "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
-                    downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
-                    error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at, expected_sha256,
-                    actual_sha256, checksum_result, finalization, queue_id, queue_position,
-                    host, next_retry_at
-             FROM downloads WHERE request_id = ?1",
-            params![request_id],
-            map_task_row,
-        )
-        .optional()
-        .map_err(map_db_err)
+        let sql = format!("{DOWNLOAD_SELECT} WHERE request_id = ?1");
+        conn.query_row(&sql, params![request_id], map_task_row)
+            .optional()
+            .map_err(map_db_err)
     }
 
     pub fn upsert_download(&self, task: &DownloadTask) -> Result<(), AppError> {
@@ -270,8 +248,8 @@ impl Database {
                 error_code, error_message, error_retryable, etag, last_modified,
                 request_id, retry_count, created_at, updated_at, expected_sha256,
                 actual_sha256, checksum_result, finalization, queue_id, queue_position,
-                host, next_retry_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28)
+                host, next_retry_at, transfer_mode
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24,?25,?26,?27,?28,?29)
              ON CONFLICT(id) DO UPDATE SET
                 url=excluded.url,
                 file_name=excluded.file_name,
@@ -298,7 +276,8 @@ impl Database {
                 queue_id=excluded.queue_id,
                 queue_position=excluded.queue_position,
                 host=excluded.host,
-                next_retry_at=excluded.next_retry_at",
+                next_retry_at=excluded.next_retry_at,
+                transfer_mode=excluded.transfer_mode",
             params![
                 task.id,
                 task.url,
@@ -328,6 +307,7 @@ impl Database {
                 task.queue_position,
                 task.host,
                 task.next_retry_at.map(|dt| dt.to_rfc3339()),
+                task.transfer_mode.as_str(),
             ],
         )
         .map_err(map_db_err)?;
@@ -336,6 +316,11 @@ impl Database {
 
     pub fn remove_download(&self, id: &str) -> Result<(), AppError> {
         let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM download_segments WHERE task_id = ?1",
+            params![id],
+        )
+        .map_err(map_db_err)?;
         let changed = conn
             .execute("DELETE FROM downloads WHERE id = ?1", params![id])
             .map_err(map_db_err)?;
@@ -348,16 +333,129 @@ impl Database {
         Ok(())
     }
 
+    pub fn replace_segments(&self, segments: &[DownloadSegment]) -> Result<(), AppError> {
+        let first = segments
+            .first()
+            .ok_or_else(|| AppError::new(ErrorCode::Internal, "Empty segment plan"))?;
+        if segments.len() > 4
+            || segments.iter().any(|s| {
+                s.task_id != first.task_id
+                    || s.end_byte < s.start_byte
+                    || s.end_byte > i64::MAX as u64
+                    || s.completed_bytes > s.expected_len()
+            })
+        {
+            return Err(AppError::new(ErrorCode::Internal, "Invalid segment plan"));
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(map_db_err)?;
+        if let Some(first) = segments.first() {
+            tx.execute(
+                "DELETE FROM download_segments WHERE task_id = ?1",
+                params![first.task_id],
+            )
+            .map_err(map_db_err)?;
+        }
+        for segment in segments {
+            tx.execute(
+                "INSERT INTO download_segments (
+                    task_id, segment_index, start_byte, end_byte, completed_bytes, status, updated_at
+                 ) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+                params![
+                    segment.task_id,
+                    segment.segment_index as i64,
+                    segment.start_byte as i64,
+                    segment.end_byte as i64,
+                    segment.completed_bytes as i64,
+                    segment.status.as_str(),
+                    segment.updated_at.to_rfc3339(),
+                ],
+            )
+            .map_err(map_db_err)?;
+        }
+        let changed = tx
+            .execute(
+                "UPDATE downloads SET transfer_mode='segmented' WHERE id=?1",
+                params![first.task_id],
+            )
+            .map_err(map_db_err)?;
+        if changed != 1 {
+            return Err(AppError::new(ErrorCode::TaskNotFound, "Download not found"));
+        }
+        tx.commit().map_err(map_db_err)
+    }
+
+    pub fn clear_segments(&self, task_id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "DELETE FROM download_segments WHERE task_id = ?1",
+            params![task_id],
+        )
+        .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    pub fn list_segments(&self, task_id: &str) -> Result<Vec<DownloadSegment>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare(
+                "SELECT task_id, segment_index, start_byte, end_byte, completed_bytes, status, updated_at
+                 FROM download_segments
+                 WHERE task_id = ?1
+                 ORDER BY segment_index ASC",
+            )
+            .map_err(map_db_err)?;
+        let rows = stmt
+            .query_map(params![task_id], map_segment_row)
+            .map_err(map_db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
+    pub fn update_segment_checkpoint(
+        &self,
+        task_id: &str,
+        segment_index: u32,
+        completed_bytes: u64,
+        status: SegmentStatus,
+    ) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        let changed = conn
+            .execute(
+                "UPDATE download_segments
+                 SET completed_bytes = ?1, status = ?2, updated_at = ?3
+                 WHERE task_id = ?4 AND segment_index = ?5",
+                params![
+                    completed_bytes as i64,
+                    status.as_str(),
+                    Utc::now().to_rfc3339(),
+                    task_id,
+                    segment_index as i64,
+                ],
+            )
+            .map_err(map_db_err)?;
+        if changed == 0 {
+            return Err(AppError::new(
+                ErrorCode::TaskNotFound,
+                format!("Segment not found: {task_id}/{segment_index}"),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn get_settings(&self) -> Result<Settings, AppError> {
         let conn = self.conn.lock();
         conn.query_row(
-            "SELECT max_concurrent_downloads, default_destination_id, auto_start FROM settings WHERE id = 1",
+            "SELECT max_concurrent_downloads, default_destination_id, auto_start, max_connections_per_download
+             FROM settings WHERE id = 1",
             [],
             |row| {
                 Ok(Settings {
                     max_concurrent_downloads: row.get::<_, i64>(0)? as u32,
                     default_destination_id: row.get(1)?,
                     auto_start: row.get::<_, i64>(2)? != 0,
+                    max_connections_per_download: row.get::<_, i64>(3)? as u32,
                 })
             },
         )
@@ -387,13 +485,24 @@ impl Database {
         if let Some(v) = patch.auto_start {
             current.auto_start = v;
         }
+        if let Some(v) = patch.max_connections_per_download {
+            if !(1..=4).contains(&v) {
+                return Err(AppError::new(
+                    ErrorCode::Internal,
+                    "maxConnectionsPerDownload must be between 1 and 4",
+                ));
+            }
+            current.max_connections_per_download = v;
+        }
         let conn = self.conn.lock();
         conn.execute(
-            "UPDATE settings SET max_concurrent_downloads=?1, default_destination_id=?2, auto_start=?3 WHERE id=1",
+            "UPDATE settings SET max_concurrent_downloads=?1, default_destination_id=?2, auto_start=?3,
+             max_connections_per_download=?4 WHERE id=1",
             params![
                 current.max_concurrent_downloads as i64,
                 current.default_destination_id,
                 i64::from(current.auto_start),
+                current.max_connections_per_download as i64,
             ],
         )
         .map_err(map_db_err)?;
@@ -592,6 +701,26 @@ fn migrate_v4_destinations(tx: &rusqlite::Transaction<'_>) -> Result<(), AppErro
     .map_err(map_db_err)
 }
 
+fn migrate_v5_segmentation(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "ALTER TABLE downloads ADD COLUMN transfer_mode TEXT NOT NULL DEFAULT 'single';
+         ALTER TABLE settings ADD COLUMN max_connections_per_download INTEGER NOT NULL DEFAULT 1 CHECK(max_connections_per_download BETWEEN 1 AND 4);
+         CREATE TABLE IF NOT EXISTS download_segments (
+           task_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+           segment_index INTEGER NOT NULL CHECK(segment_index BETWEEN 0 AND 3),
+           start_byte INTEGER NOT NULL CHECK(start_byte >= 0),
+           end_byte INTEGER NOT NULL CHECK(end_byte >= start_byte),
+           completed_bytes INTEGER NOT NULL DEFAULT 0 CHECK(completed_bytes >= 0 AND completed_bytes <= end_byte - start_byte + 1),
+           status TEXT NOT NULL CHECK(status IN ('pending','active','complete','failed')),
+           updated_at TEXT NOT NULL,
+           PRIMARY KEY (task_id, segment_index)
+         );
+         CREATE INDEX IF NOT EXISTS idx_download_segments_task
+           ON download_segments(task_id);",
+    )
+    .map_err(map_db_err)
+}
+
 pub fn backup_path(db_path: &Path) -> PathBuf {
     let mut bak = db_path.as_os_str().to_owned();
     bak.push(".bak");
@@ -660,6 +789,11 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
         .get::<_, Option<String>>(27)?
         .map(|v| parse_dt(&v))
         .transpose()?;
+    let transfer_mode = row
+        .get::<_, Option<String>>(28)?
+        .as_deref()
+        .map(TransferMode::parse)
+        .unwrap_or_default();
     Ok(DownloadTask {
         id: row.get(0)?,
         url: row.get(1)?,
@@ -689,8 +823,21 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
             .get::<_, Option<String>>(26)?
             .unwrap_or_else(|| "unknown".into()),
         next_retry_at,
+        transfer_mode,
         created_at,
         updated_at,
+    })
+}
+
+fn map_segment_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadSegment> {
+    Ok(DownloadSegment {
+        task_id: row.get(0)?,
+        segment_index: row.get::<_, i64>(1)? as u32,
+        start_byte: row.get::<_, i64>(2)? as u64,
+        end_byte: row.get::<_, i64>(3)? as u64,
+        completed_bytes: row.get::<_, i64>(4)? as u64,
+        status: SegmentStatus::parse(&row.get::<_, String>(5)?),
+        updated_at: parse_dt(&row.get::<_, String>(6)?)?,
     })
 }
 
@@ -738,6 +885,7 @@ mod tests {
             queue_id: "default".into(),
             queue_position: Some(1),
             host: "example.com".into(),
+            transfer_mode: TransferMode::Single,
         }
     }
 
@@ -785,6 +933,9 @@ mod migration_tests {
         // Restore precisely the v1 column/version shape, then open via the real migration.
         db.conn.lock().execute_batch(
             "DROP INDEX IF EXISTS idx_downloads_queue_order;
+            DROP INDEX IF EXISTS idx_download_segments_task;
+            DROP TABLE IF EXISTS download_segments;
+            DROP TABLE IF EXISTS destinations;
             ALTER TABLE downloads DROP COLUMN expected_sha256;
             ALTER TABLE downloads DROP COLUMN actual_sha256;
             ALTER TABLE downloads DROP COLUMN checksum_result;
@@ -793,6 +944,8 @@ mod migration_tests {
             ALTER TABLE downloads DROP COLUMN queue_position;
             ALTER TABLE downloads DROP COLUMN host;
             ALTER TABLE downloads DROP COLUMN next_retry_at;
+            ALTER TABLE downloads DROP COLUMN transfer_mode;
+            ALTER TABLE settings DROP COLUMN max_connections_per_download;
             DELETE FROM schema_migrations WHERE version>=2;
             INSERT INTO downloads(id,url,file_name,destination_id,status,created_at,updated_at)
             VALUES('legacy','https://example.com/file','file','default','paused','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');",
@@ -800,7 +953,7 @@ mod migration_tests {
         drop(db);
         for _ in 0..2 {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 4);
+            assert_eq!(db.schema_version().unwrap(), 5);
             let task = db.get_download("legacy").unwrap();
             assert_eq!(task.file_name, "file");
             assert!(task.actual_sha256.is_none());
@@ -869,5 +1022,53 @@ mod migration_tests {
         task_b.request_id = Some("req-b".into());
         db_b.upsert_download(&task_b).unwrap();
         assert_eq!(db_a.list_downloads().unwrap().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod segmentation_tests {
+    use super::*;
+    use crate::application::segmentation::plan_segments;
+
+    #[test]
+    fn v4_upgrade_preserves_existing_task_and_defaults_to_single_connection() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("data.db");
+        let db = Database::open(&path).unwrap();
+        db.upsert_download(&super::tests::sample_task("v4"))
+            .unwrap();
+        db.conn.lock().execute_batch("DROP TABLE download_segments; ALTER TABLE downloads DROP COLUMN transfer_mode; ALTER TABLE settings DROP COLUMN max_connections_per_download; DELETE FROM schema_migrations WHERE version=5;").unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(
+            db.get_download("v4").unwrap().transfer_mode,
+            TransferMode::Single
+        );
+        assert_eq!(db.get_settings().unwrap().max_connections_per_download, 1);
+        assert!(backup_path(&path).exists());
+    }
+
+    #[test]
+    fn segment_plan_replacement_is_atomic_and_checkpoint_bounds_are_enforced() {
+        let db = Database::open_in_memory().unwrap();
+        db.upsert_download(&super::tests::sample_task("t")).unwrap();
+        let plan = plan_segments("t", 16, 4);
+        db.replace_segments(&plan).unwrap();
+        assert_eq!(
+            db.get_download("t").unwrap().transfer_mode,
+            TransferMode::Segmented
+        );
+        let mut invalid = plan.clone();
+        invalid[1].segment_index = 0;
+        assert!(db.replace_segments(&invalid).is_err());
+        assert_eq!(db.list_segments("t").unwrap(), plan);
+        assert!(
+            db.update_segment_checkpoint("t", 0, 5, SegmentStatus::Complete)
+                .is_err()
+        );
+        assert_eq!(db.list_segments("t").unwrap()[0].completed_bytes, 0);
+        db.remove_download("t").unwrap();
+        assert!(db.list_segments("t").unwrap().is_empty());
     }
 }

@@ -30,7 +30,7 @@ function stubSupportCommands() {
       return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
     }
     if (command === 'get_settings') {
-      return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+      return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: 1 }
     }
     throw new Error(`Unexpected command ${command}`)
   })
@@ -56,7 +56,7 @@ describe('add Download workflow', () => {
         return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
       }
       if (command === 'get_settings') {
-        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: 1 }
       }
       if (command === 'create_download')
         return task({ status: 'paused' })
@@ -80,12 +80,12 @@ describe('add Download workflow', () => {
         return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
       }
       if (command === 'get_settings') {
-        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: 1 }
       }
       if (command === 'create_download') {
         createCalls += 1
         if (createCalls === 1)
-          throw { code: 'DISK_FULL', message: 'full', retryable: false }
+          throw Object.assign(new Error('full'), { code: 'DISK_FULL', retryable: false })
         return task()
       }
       throw new Error(command)
@@ -99,7 +99,7 @@ describe('add Download workflow', () => {
     expect(screen.getByLabelText('Download URL')).toHaveValue('https://example.com/file.zip')
     await user.click(screen.getByRole('button', { name: 'Add download' }))
     await waitFor(() => expect(createCalls).toBe(2))
-    const createArgs = invoke.mock.calls.filter(([command]) => command === 'create_download').map(call => call[1])
+    const createArgs = invoke.mock.calls.filter(([command]) => command === 'create_download').map(([, input]): unknown => input)
     expect(createArgs[0]).toEqual(createArgs[1])
     expect(createArgs[1]).toMatchObject({ input: { suggestedName: 'custom.zip' } })
   })
@@ -110,7 +110,7 @@ describe('add Download workflow', () => {
         return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
       }
       if (command === 'get_settings') {
-        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: 1 }
       }
       if (command === 'create_download') {
         return new Promise((done) => {
@@ -136,7 +136,7 @@ describe('add Download workflow', () => {
         return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
       }
       if (command === 'get_settings') {
-        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: 1 }
       }
       if (command === 'create_download')
         return task()

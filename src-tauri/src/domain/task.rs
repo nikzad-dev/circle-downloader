@@ -3,6 +3,81 @@ use super::status::DownloadStatus;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "camelCase")]
+pub enum TransferMode {
+    #[default]
+    Single,
+    Segmented,
+}
+
+impl TransferMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Single => "single",
+            Self::Segmented => "segmented",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "segmented" => Self::Segmented,
+            _ => Self::Single,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SegmentStatus {
+    Pending,
+    Active,
+    Complete,
+    Failed,
+}
+
+impl SegmentStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Active => "active",
+            Self::Complete => "complete",
+            Self::Failed => "failed",
+        }
+    }
+
+    pub fn parse(value: &str) -> Self {
+        match value {
+            "active" => Self::Active,
+            "complete" => Self::Complete,
+            "failed" => Self::Failed,
+            _ => Self::Pending,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DownloadSegment {
+    pub task_id: String,
+    pub segment_index: u32,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub completed_bytes: u64,
+    pub status: SegmentStatus,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl DownloadSegment {
+    pub fn expected_len(&self) -> u64 {
+        self.end_byte
+            .saturating_sub(self.start_byte)
+            .saturating_add(1)
+    }
+
+    pub fn remaining(&self) -> u64 {
+        self.expected_len().saturating_sub(self.completed_bytes)
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskError {
@@ -29,6 +104,7 @@ pub struct DownloadTask {
     pub actual_sha256: Option<String>,
     /// computed, matched, or mismatch; length validation is independent.
     pub checksum_result: Option<String>,
+    pub transfer_mode: TransferMode,
     #[serde(skip)]
     pub finalization: Option<String>,
     pub created_at: DateTime<Utc>,
@@ -94,6 +170,8 @@ pub struct Settings {
     pub max_concurrent_downloads: u32,
     pub default_destination_id: String,
     pub auto_start: bool,
+    /// Opt-in multi-connection fan-out per download (1 = single-connection).
+    pub max_connections_per_download: u32,
 }
 
 impl Default for Settings {
@@ -102,6 +180,7 @@ impl Default for Settings {
             max_concurrent_downloads: 3,
             default_destination_id: "default".to_string(),
             auto_start: true,
+            max_connections_per_download: 1,
         }
     }
 }
@@ -112,6 +191,7 @@ pub struct UpdateSettingsRequest {
     pub max_concurrent_downloads: Option<u32>,
     pub default_destination_id: Option<String>,
     pub auto_start: Option<bool>,
+    pub max_connections_per_download: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

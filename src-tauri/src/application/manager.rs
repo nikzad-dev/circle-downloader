@@ -1,15 +1,19 @@
 use crate::application::retry::{PER_HOST_LIMIT, RETRY_BUDGET, next_retry_at};
+use crate::application::segmentation::{
+    SegmentationRequest, coverage_contiguous, download_with_optional_segmentation,
+    reconcile_segment_file, segment_file_path,
+};
 use crate::domain::filename::{filename_from_url, sanitize_filename};
 use crate::domain::transitions::ensure_transition;
 use crate::domain::url_policy::validate_download_url;
 use crate::domain::{
     AppError, CreateDownloadRequest, Destination, DownloadStatus, DownloadTask, ErrorCode,
     GrantDestinationRequest, ProgressEvent, Queue, RemoveDownloadRequest, RemoveDownloadResult,
-    Settings, TaskError, UpdateSettingsRequest,
+    Settings, TaskError, TransferMode, UpdateSettingsRequest,
 };
 use crate::infrastructure::db::{Database, is_unique_constraint};
 use crate::infrastructure::files::ManagedFiles;
-use crate::infrastructure::http::{ResumeMetadata, cancel_pair, download_managed};
+use crate::infrastructure::http::cancel_pair;
 use crate::infrastructure::ownership::DataDirectoryLease;
 use crate::ipc::progress::ProgressHub;
 use chrono::Utc;
@@ -189,6 +193,7 @@ impl DownloadManager {
             queue_id,
             queue_position,
             host,
+            transfer_mode: TransferMode::Single,
         };
         if let Err(error) = self.inner.db.upsert_download(&task) {
             if is_unique_constraint(&error)
@@ -233,7 +238,16 @@ impl DownloadManager {
                 let root = resolve_root(&self.inner, &task.destination_id)?;
                 let files = ManagedFiles::new(&root)?;
                 let name = managed_name(&root, temp)?;
-                task.downloaded_bytes = files.length(&name)?.unwrap_or(0);
+                task.downloaded_bytes = if task.transfer_mode == TransferMode::Segmented {
+                    self.inner
+                        .db
+                        .list_segments(&task.id)?
+                        .iter()
+                        .map(|s| s.completed_bytes)
+                        .sum()
+                } else {
+                    files.length(&name)?.unwrap_or(0)
+                };
             }
             enqueue_runnable(&self.inner, &mut task)?;
             task.error = None;
@@ -280,7 +294,16 @@ impl DownloadManager {
             let root = resolve_root(&self.inner, &task.destination_id)?;
             let files = ManagedFiles::new(&root)?;
             let name = managed_name(&root, temp)?;
-            task.downloaded_bytes = files.length(&name)?.unwrap_or(0);
+            task.downloaded_bytes = if task.transfer_mode == TransferMode::Segmented {
+                self.inner
+                    .db
+                    .list_segments(&task.id)?
+                    .iter()
+                    .map(|segment| segment.completed_bytes)
+                    .sum()
+            } else {
+                files.length(&name)?.unwrap_or(0)
+            };
             task.bump_revision();
             self.inner.db.upsert_download(&task)?;
             self.emit_progress(&task);
@@ -342,6 +365,10 @@ impl DownloadManager {
         {
             let root = resolve_root(&self.inner, &task.destination_id)?;
             let files = ManagedFiles::new(&root)?;
+            for segment in self.inner.db.list_segments(&task.id)? {
+                let path = segment_file_path(temp, segment.segment_index);
+                files.remove(&managed_name(&root, &path.to_string_lossy())?)?;
+            }
             files.remove(&managed_name(&root, temp)?)?;
         }
         self.inner.db.remove_download(&req.id)?;
@@ -709,8 +736,14 @@ async fn execute_download(
             "Restart Circle to recover the verified publication before retrying.",
         ));
     }
-    let resume_from = files.length(&temp_name)?.unwrap_or(0);
-    task.downloaded_bytes = resume_from;
+    let settings = inner.db.get_settings()?;
+    let max_connections = settings.max_connections_per_download;
+    if task.transfer_mode == TransferMode::Segmented {
+        let segments = inner.db.list_segments(task_id)?;
+        task.downloaded_bytes = segments.iter().map(|s| s.completed_bytes).sum();
+    } else {
+        task.downloaded_bytes = files.length(&temp_name)?.unwrap_or(0);
+    }
 
     {
         let _mutation = inner.mutations.lock();
@@ -722,15 +755,16 @@ async fn execute_download(
         emit(inner, &task);
     }
 
-    let download = download_managed(
-        (&inner.http, &files),
-        &task.url,
-        Path::new(&temp_path),
-        ResumeMetadata {
-            offset: resume_from,
-            etag: task.etag.clone(),
+    let download = download_with_optional_segmentation(
+        SegmentationRequest {
+            client: &inner.http,
+            files: &files,
+            db: &inner.db,
+            task: &mut task,
+            temp_path: Path::new(&temp_path),
+            max_connections,
+            cancel,
         },
-        cancel,
         |metadata| {
             let _mutation = inner.mutations.lock();
             let mut current = inner.db.get_download(task_id)?;
@@ -760,7 +794,7 @@ async fn execute_download(
                     current.status = DownloadStatus::Verifying;
                 }
                 current.downloaded_bytes = update.transferred_bytes;
-                current.total_bytes = update.total_bytes.or(current.total_bytes);
+                current.total_bytes = update.total_bytes;
                 current.speed_bytes_per_second = update.bytes_per_second;
                 current.bump_revision();
                 if inner.db.upsert_download(&current).is_ok() {
@@ -770,6 +804,15 @@ async fn execute_download(
         },
     )
     .await;
+
+    // Persist final transfer mode chosen by the coordinator.
+    {
+        let _mutation = inner.mutations.lock();
+        if let Ok(mut current) = inner.db.get_download(task_id) {
+            current.transfer_mode = task.transfer_mode;
+            let _ = inner.db.upsert_download(&current);
+        }
+    }
 
     let _mutation = inner.mutations.lock();
     // Stop and finalization share a mutation boundary; neither can resurrect the other.
@@ -952,7 +995,15 @@ fn complete_and_cleanup(
     task.bump_revision();
     inner.db.upsert_download(task)?; // Keep partial path until completed state is durable.
     if let Some(temp) = &task.temp_path {
+        let segments = inner.db.list_segments(&task.id)?;
+        for segment in &segments {
+            let seg = segment_file_path(temp, segment.segment_index);
+            if let Ok(name) = managed_name(root, &seg.to_string_lossy()) {
+                files.remove(&name)?;
+            }
+        }
         files.remove(&managed_name(root, temp)?)?;
+        inner.db.clear_segments(&task.id)?;
     }
     task.temp_path = None;
     task.finalization = None;
@@ -1037,7 +1088,37 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
             "A final file exists without a verified publication checkpoint. It was kept; add a fresh download.",
         ));
     }
-    if let Some(temp) = &task.temp_path {
+    if task.transfer_mode == TransferMode::Segmented {
+        if let Some(temp) = task.temp_path.as_deref() {
+            let segments = inner.db.list_segments(&task.id)?;
+            if !coverage_contiguous(&segments, task.total_bytes.unwrap_or(0)) {
+                return Err(AppError::new(
+                    ErrorCode::ResourceChanged,
+                    "The saved segment plan is inconsistent. Add a fresh download.",
+                ));
+            }
+            if !segments.is_empty() {
+                for segment in &segments {
+                    let seg = segment_file_path(temp, segment.segment_index);
+                    let on_disk = reconcile_segment_file(&files, &seg, segment)?;
+                    if on_disk != segment.completed_bytes {
+                        inner.db.update_segment_checkpoint(
+                            &task.id,
+                            segment.segment_index,
+                            on_disk,
+                            if on_disk == segment.expected_len() {
+                                crate::domain::SegmentStatus::Complete
+                            } else {
+                                crate::domain::SegmentStatus::Pending
+                            },
+                        )?;
+                    }
+                }
+                let segments = inner.db.list_segments(&task.id)?;
+                task.downloaded_bytes = segments.iter().map(|s| s.completed_bytes).sum();
+            }
+        }
+    } else if let Some(temp) = &task.temp_path {
         let length = files.length(&managed_name(&root, temp)?)?;
         match length {
             Some(length) => {

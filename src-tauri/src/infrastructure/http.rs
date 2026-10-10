@@ -32,6 +32,26 @@ pub struct ResponseMetadata {
     pub last_modified: Option<String>,
 }
 
+/// Inclusive byte range for a segmented transfer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: u64,
+    pub end: u64,
+}
+
+impl ByteRange {
+    fn len(self) -> u64 {
+        self.end.saturating_sub(self.start).saturating_add(1)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SegmentCapability {
+    pub total_bytes: u64,
+    pub etag: String,
+    pub last_modified: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ProgressUpdate {
     pub transferred_bytes: u64,
@@ -119,7 +139,8 @@ fn validate_metadata(
                     "Missing Content-Range on resumed response",
                 )
             })?;
-        let total = validate_content_range(range, resume.offset, response.content_length())?;
+        // Suffix resume must extend through EOF.
+        let total = validate_content_range(range, resume.offset, None, response.content_length())?;
         Some(total)
     } else {
         response.content_length()
@@ -131,7 +152,13 @@ fn validate_metadata(
     })
 }
 
-fn validate_content_range(value: &str, offset: u64, length: Option<u64>) -> Result<u64, AppError> {
+/// Validate Content-Range. `expected_end = None` means the span must reach EOF.
+fn validate_content_range(
+    value: &str,
+    expected_start: u64,
+    expected_end: Option<u64>,
+    length: Option<u64>,
+) -> Result<u64, AppError> {
     let invalid = || {
         AppError::new(
             ErrorCode::RangeUnsupported,
@@ -144,17 +171,348 @@ fn validate_content_range(value: &str, offset: u64, length: Option<u64>) -> Resu
     let start: u64 = start.parse().map_err(|_| invalid())?;
     let end: u64 = end.parse().map_err(|_| invalid())?;
     let total: u64 = total.parse().map_err(|_| invalid())?;
-    if start != offset || end < start || end >= total || end.checked_add(1) != Some(total) {
+    if start != expected_start || end < start || end >= total {
         return Err(invalid());
     }
-    let expected = end
+    match expected_end {
+        None => {
+            if end.checked_add(1) != Some(total) {
+                return Err(invalid());
+            }
+        }
+        Some(expected) => {
+            if end != expected {
+                return Err(invalid());
+            }
+        }
+    }
+    let expected_len = end
         .checked_sub(start)
         .and_then(|v| v.checked_add(1))
         .ok_or_else(invalid)?;
-    if length.is_some_and(|v| v != expected) {
+    if length.is_some_and(|v| v != expected_len) {
         return Err(invalid());
     }
     Ok(total)
+}
+
+fn response_etag_last_modified(response: &reqwest::Response) -> (Option<String>, Option<String>) {
+    let headers = response.headers();
+    let etag = headers
+        .get(header::ETAG)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    let last_modified = headers
+        .get(header::LAST_MODIFIED)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned);
+    (etag, last_modified)
+}
+
+fn reject_encoded(response: &reqwest::Response) -> Result<(), AppError> {
+    let encoding = response
+        .headers()
+        .get(header::CONTENT_ENCODING)
+        .and_then(|v| v.to_str().ok());
+    if encoding.is_some_and(|value| !value.eq_ignore_ascii_case("identity")) {
+        return Err(AppError::new(
+            ErrorCode::RangeUnsupported,
+            "Encoded file responses cannot be safely verified",
+        ));
+    }
+    Ok(())
+}
+
+/// Probe whether an origin supports integrity-safe multi-connection ranges.
+pub async fn probe_segment_capability(
+    client: &Client,
+    url: &str,
+    cancel: &CancelToken,
+) -> Result<Option<SegmentCapability>, AppError> {
+    crate::domain::url_policy::validate_download_url(url)?;
+    if cancel.is_cancelled() {
+        return Err(canceled());
+    }
+    let timeouts = TransferTimeouts::default();
+    let request = client
+        .get(url)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .header(header::RANGE, "bytes=0-0");
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(canceled()),
+        result = tokio::time::timeout(timeouts.headers, request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
+    };
+    if response.status() != StatusCode::PARTIAL_CONTENT {
+        // Drain/drop body; origin is not segment-compatible.
+        return Ok(None);
+    }
+    if reject_encoded(&response).is_err()
+        || !response
+            .headers()
+            .get(header::ACCEPT_RANGES)
+            .and_then(|v| v.to_str().ok())
+            .is_some_and(|v| v.trim().eq_ignore_ascii_case("bytes"))
+    {
+        return Ok(None);
+    }
+    let (etag, last_modified) = response_etag_last_modified(&response);
+    let Some(etag) = etag.filter(|v| strong_etag(v)) else {
+        return Ok(None);
+    };
+    let range = response
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok());
+    let Some(range) = range else {
+        return Ok(None);
+    };
+    let Ok(total) = validate_content_range(range, 0, Some(0), response.content_length()) else {
+        return Ok(None);
+    };
+    if total < 2 {
+        return Ok(None);
+    }
+    // Consume the one-byte body so the connection can close cleanly.
+    if !consume_probe(response, cancel, timeouts.body).await? {
+        return Ok(None);
+    }
+    // Mid-file probe confirms arbitrary ranges, not only prefix.
+    let mid = total / 2;
+    let mid_request = client
+        .get(url)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .header(header::RANGE, format!("bytes={mid}-{mid}"))
+        .header(header::IF_RANGE, &etag);
+    let mid_response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(canceled()),
+        result = tokio::time::timeout(timeouts.headers, mid_request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
+    };
+    if mid_response.status() != StatusCode::PARTIAL_CONTENT {
+        return Ok(None);
+    }
+    if reject_encoded(&mid_response).is_err() {
+        return Ok(None);
+    }
+    let (mid_etag, _) = response_etag_last_modified(&mid_response);
+    if mid_etag.as_deref() != Some(etag.as_str()) {
+        return Ok(None);
+    }
+    let mid_range = mid_response
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok());
+    let Some(mid_range) = mid_range else {
+        return Ok(None);
+    };
+    if validate_content_range(mid_range, mid, Some(mid), mid_response.content_length()).ok()
+        != Some(total)
+    {
+        return Ok(None);
+    }
+    if !consume_probe(mid_response, cancel, timeouts.body).await? {
+        return Ok(None);
+    }
+    Ok(Some(SegmentCapability {
+        total_bytes: total,
+        etag,
+        last_modified,
+    }))
+}
+
+async fn consume_probe(
+    response: reqwest::Response,
+    cancel: &CancelToken,
+    timeout: Duration,
+) -> Result<bool, AppError> {
+    let mut stream = response.bytes_stream();
+    let mut received = 0usize;
+    loop {
+        let next = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(canceled()),
+            result = tokio::time::timeout(timeout, stream.next()) => result.map_err(|_| network_deadline("The server stopped sending probe data. Check your connection and retry."))?,
+        };
+        match next {
+            Some(Ok(chunk)) => {
+                received = received.saturating_add(chunk.len());
+                if received > 1 {
+                    return Ok(false);
+                }
+            }
+            Some(Err(_)) => return Ok(false),
+            None => return Ok(received == 1),
+        }
+    }
+}
+
+/// Download an exact inclusive byte range into a dedicated segment file.
+pub struct RangeRequest<'a> {
+    pub url: &'a str,
+    pub dest: &'a Path,
+    pub range: ByteRange,
+    pub resume: u64,
+    pub etag: &'a str,
+    pub total: u64,
+}
+
+pub async fn download_range_managed(
+    context: (&Client, &super::files::ManagedFiles),
+    request: RangeRequest<'_>,
+    cancel: &CancelToken,
+    mut on_progress: impl FnMut(u64) -> Result<(), AppError>,
+) -> Result<u64, AppError> {
+    let RangeRequest {
+        url,
+        dest,
+        range,
+        resume: resume_within_segment,
+        etag,
+        total: expected_total,
+    } = request;
+    let (client, files) = context;
+    crate::domain::url_policy::validate_download_url(url)?;
+    if cancel.is_cancelled() {
+        return Err(canceled());
+    }
+    if !strong_etag(etag) {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "This partial file cannot be resumed safely; add a fresh download",
+        ));
+    }
+    if range.end < range.start {
+        return Err(AppError::new(
+            ErrorCode::RangeUnsupported,
+            "The server returned an incompatible byte range",
+        ));
+    }
+    let expected_len = range.len();
+    if resume_within_segment > expected_len {
+        return Err(AppError::new(
+            ErrorCode::LengthMismatch,
+            "Segment progress exceeds the planned range",
+        ));
+    }
+    if resume_within_segment == expected_len {
+        on_progress(resume_within_segment)?;
+        return Ok(resume_within_segment);
+    }
+    let request_start = range
+        .start
+        .checked_add(resume_within_segment)
+        .ok_or_else(|| AppError::new(ErrorCode::LengthMismatch, "File size overflow"))?;
+    let timeouts = TransferTimeouts::default();
+    let request = client
+        .get(url)
+        .header(header::ACCEPT_ENCODING, "identity")
+        .header(
+            header::RANGE,
+            format!("bytes={request_start}-{}", range.end),
+        )
+        .header(header::IF_RANGE, etag);
+    let response = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(canceled()),
+        result = tokio::time::timeout(timeouts.headers, request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
+    };
+    match response.status() {
+        StatusCode::OK => {
+            return Err(AppError::new(
+                ErrorCode::ResourceChanged,
+                "The server ignored Range; add a fresh download",
+            ));
+        }
+        StatusCode::PARTIAL_CONTENT => {}
+        status => {
+            return Err(http_status_error_with_retry_after(
+                status,
+                response.headers().get(header::RETRY_AFTER),
+            ));
+        }
+    }
+    reject_encoded(&response)?;
+    let (response_etag, _) = response_etag_last_modified(&response);
+    if response_etag.as_deref() != Some(etag) {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "The partial file has no matching strong validator; add a fresh download",
+        ));
+    }
+    let content_range = response
+        .headers()
+        .get(header::CONTENT_RANGE)
+        .and_then(|v| v.to_str().ok())
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::RangeUnsupported,
+                "Missing Content-Range on resumed response",
+            )
+        })?;
+    let total = validate_content_range(
+        content_range,
+        request_start,
+        Some(range.end),
+        response.content_length(),
+    )?;
+    if total != expected_total || total <= range.end {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "The server returned an incompatible byte range",
+        ));
+    }
+    let name = files.name(dest)?;
+    let mut file = File::from_std(files.partial(Path::new(name), resume_within_segment)?);
+    let mut stream = response.bytes_stream();
+    let mut written = resume_within_segment;
+    let started = Instant::now();
+    let mut last_tick = started;
+    let transfer = async {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(canceled()),
+                result = tokio::time::timeout(timeouts.body, stream.next()) => result.map_err(|_| network_deadline("The server stopped sending file data. Check your connection and retry."))?,
+            };
+            let Some(chunk) = next else { break };
+            let chunk = chunk.map_err(map_reqwest_err)?;
+            let next_written = written
+                .checked_add(chunk.len() as u64)
+                .ok_or_else(|| AppError::new(ErrorCode::LengthMismatch, "File size overflow"))?;
+            if next_written > expected_len {
+                return Err(AppError::new(
+                    ErrorCode::LengthMismatch,
+                    "Response exceeded the declared file size",
+                ));
+            }
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(canceled()),
+                result = file.write_all(&chunk) => result.map_err(map_io_err)?,
+            }
+            written = next_written;
+            if last_tick.elapsed().as_millis() >= 100 {
+                file.flush().await.map_err(map_io_err)?;
+                file.sync_all().await.map_err(map_io_err)?;
+                on_progress(written)?;
+                last_tick = Instant::now();
+            }
+        }
+        if written != expected_len {
+            return Err(AppError::new(
+                ErrorCode::LengthMismatch,
+                "The response ended before all expected bytes arrived",
+            ));
+        }
+        Ok::<(), AppError>(())
+    }
+    .await;
+    file.flush().await.map_err(map_io_err)?;
+    file.sync_all().await.map_err(map_io_err)?;
+    on_progress(written)?;
+    transfer?;
+    Ok(written)
 }
 
 #[cfg(test)]
@@ -403,7 +761,7 @@ pub async fn hash_file(path: &Path, cancel: &CancelToken) -> Result<String, AppE
     hash_reader(file, cancel).await
 }
 
-async fn hash_reader(
+pub(crate) async fn hash_reader(
     mut reader: impl tokio::io::AsyncRead + Unpin,
     cancel: &CancelToken,
 ) -> Result<String, AppError> {
@@ -440,13 +798,21 @@ mod tests {
             "garbage",
             "bytes 5-18446744073709551615/0",
         ] {
-            assert!(validate_content_range(range, 5, None).is_err(), "{range}");
+            assert!(
+                validate_content_range(range, 5, None, None).is_err(),
+                "{range}"
+            );
         }
         assert_eq!(
-            validate_content_range("bytes 5-9/10", 5, Some(5)).unwrap(),
+            validate_content_range("bytes 5-9/10", 5, None, Some(5)).unwrap(),
             10
         );
-        assert!(validate_content_range("bytes 5-9/10", 5, Some(4)).is_err());
+        assert!(validate_content_range("bytes 5-9/10", 5, None, Some(4)).is_err());
+        assert_eq!(
+            validate_content_range("bytes 2-4/10", 2, Some(4), Some(3)).unwrap(),
+            10
+        );
+        assert!(validate_content_range("bytes 2-4/10", 2, Some(5), Some(3)).is_err());
     }
 
     #[tokio::test]
@@ -972,6 +1338,34 @@ mod tests {
         .unwrap();
         assert_eq!(result.bytes_written, 6);
         assert_eq!(result.sha256_hex, hex::encode(Sha256::digest(b"xxxxxx")));
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn probe_body_has_a_deadline_and_rejects_more_than_one_byte() {
+        let (url, server) = serve(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 1\r\n\r\n".to_vec(),
+            true,
+        )
+        .await;
+        let response = Client::new().get(&url).send().await.unwrap();
+        let (_tx, cancel) = cancel_pair();
+        let error = consume_probe(response, &cancel, Duration::from_millis(20))
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::NetworkTimeout);
+        server.abort();
+        let (url, server) = serve(
+            b"HTTP/1.1 206 Partial Content\r\nContent-Length: 2\r\nConnection: close\r\n\r\nab"
+                .to_vec(),
+            false,
+        )
+        .await;
+        let response = Client::new().get(&url).send().await.unwrap();
+        assert!(
+            !consume_probe(response, &cancel, Duration::from_secs(1))
+                .await
+                .unwrap()
+        );
         server.await.unwrap();
     }
 }

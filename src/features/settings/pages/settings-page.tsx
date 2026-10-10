@@ -17,6 +17,7 @@ export function SettingsPage() {
   const settings = useQuery(orpc.settings.get.queryOptions())
   const destinations = useQuery(orpc.destinations.list.queryOptions())
   const [concurrency, setConcurrency] = useState<number | null>(null)
+  const [connections, setConnections] = useState<number | null>(null)
 
   const update = useMutation({
     mutationFn: async (input: Parameters<typeof orpc.settings.update.call>[0]) => orpc.settings.update.call(input),
@@ -32,7 +33,7 @@ export function SettingsPage() {
   const grant = useMutation({
     mutationFn: async () => {
       const selected = await open({ directory: true, multiple: false })
-      if (!selected)
+      if (selected === null)
         return null
       return orpc.destinations.grant.call({ path: selected })
     },
@@ -62,6 +63,7 @@ export function SettingsPage() {
   })
 
   const effectiveConcurrency = concurrency ?? settings.data?.maxConcurrentDownloads ?? 3
+  const effectiveConnections = connections ?? settings.data?.maxConnectionsPerDownload ?? 1
 
   return (
     <section className="max-w-2xl space-y-6">
@@ -132,6 +134,28 @@ export function SettingsPage() {
                     }}
                   />
                 </div>
+              </div>
+              <div className="space-y-2">
+                <Label htmlFor="connections">{strings.connectionsPerDownload}</Label>
+                <div className="flex items-center gap-3">
+                  <Input
+                    id="connections"
+                    type="number"
+                    min={1}
+                    max={4}
+                    className="max-w-28"
+                    value={effectiveConnections}
+                    disabled={update.isPending}
+                    onChange={event => setConnections(Number(event.target.value))}
+                    onBlur={() => {
+                      const value = Number.isFinite(effectiveConnections) ? Math.min(4, Math.max(1, Math.trunc(effectiveConnections))) : 1
+                      setConnections(null)
+                      if (value !== settings.data.maxConnectionsPerDownload)
+                        update.mutate({ maxConnectionsPerDownload: value })
+                    }}
+                  />
+                </div>
+                <p className="text-xs text-muted-foreground">{strings.connectionsPerDownloadHint}</p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="default-destination">Default destination</Label>

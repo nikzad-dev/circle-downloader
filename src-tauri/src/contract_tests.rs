@@ -1,6 +1,6 @@
 use crate::domain::{
     AppError, DownloadStatus, DownloadTask, ErrorCode, ProgressEvent, Queue, RemoveDownloadResult,
-    Settings, TaskError,
+    Settings, TaskError, TransferMode,
 };
 use serde_json::json;
 
@@ -39,6 +39,7 @@ fn serialized_ipc_matches_the_shared_frontend_contract() {
         queue_id: "default".into(),
         queue_position: None,
         host: "example.com".into(),
+        transfer_mode: TransferMode::Single,
     };
     let payload = json!({
         "task": task,

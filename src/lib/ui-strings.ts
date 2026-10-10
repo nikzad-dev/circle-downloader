@@ -12,6 +12,11 @@ export const strings = {
   quitPolicy: 'Closing the window hides Circle to the tray. Use Quit to stop transfers and exit.',
   autoStart: 'Start downloads immediately when added',
   concurrency: 'Maximum concurrent downloads',
+  connectionsPerDownload: 'Connections per download',
+  connectionsPerDownloadHint:
+    'Optional acceleration (1–4) for files of at least 8 MiB. Uses multiple connections only with compatible byte ranges; otherwise Circle stays on one connection. Applies when a transfer starts or resumes.',
+  transferModeSingle: 'Single connection',
+  transferModeSegmented: 'Segmented (multi-connection)',
   retriesReadonly: 'Automatic retries: up to 5',
   perHostReadonly: 'Per-host limit: 2',
   addFolder: 'Add folder…',

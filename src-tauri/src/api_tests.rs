@@ -418,10 +418,12 @@ async fn settings_and_queues_apis() {
             max_concurrent_downloads: Some(4),
             default_destination_id: Some("default".into()),
             auto_start: Some(false),
+            max_connections_per_download: Some(2),
         })
         .unwrap();
     assert_eq!(updated.max_concurrent_downloads, 4);
     assert!(!updated.auto_start);
+    assert_eq!(updated.max_connections_per_download, 2);
 
     let queues = mgr.list_queues().unwrap();
     assert_eq!(queues[0].id, "default");
@@ -1464,4 +1466,633 @@ async fn settings_reject_unknown_destination_and_out_of_range_concurrency() {
         .unwrap();
     assert_eq!(ok.max_concurrent_downloads, 8);
     assert!(!ok.auto_start);
+    let bad_connections = mgr
+        .update_settings(UpdateSettingsRequest {
+            max_connections_per_download: Some(9),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(bad_connections.code, ErrorCode::Internal);
+}
+
+/// Controlled 8 MiB fixture: exact ranges, per-connection pacing and mutable faults.
+struct SegmentFixture {
+    url: String,
+    body: std::sync::Arc<Vec<u8>>,
+    fault: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    requests: std::sync::Arc<parking_lot::Mutex<Vec<(usize, usize)>>>,
+    completions: std::sync::Arc<parking_lot::Mutex<Vec<usize>>>,
+    active: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    peak: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    server: tokio::task::JoinHandle<()>,
+}
+impl Drop for SegmentFixture {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn segment_fixture(delay: Duration, fault_value: usize) -> SegmentFixture {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("http://{}/seg.bin", listener.local_addr().unwrap());
+    let body = Arc::new(
+        (0..8 * 1024 * 1024)
+            .map(|i| (i % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let fault = Arc::new(AtomicUsize::new(fault_value));
+    let requests = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let completions = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let active = Arc::new(AtomicUsize::new(0));
+    let peak = Arc::new(AtomicUsize::new(0));
+    let (data, modes, logs, finishes, counts, maxes) = (
+        body.clone(),
+        fault.clone(),
+        requests.clone(),
+        completions.clone(),
+        active.clone(),
+        peak.clone(),
+    );
+    let server = tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let (body, fault, requests, completions, active, peak) = (
+                data.clone(),
+                modes.clone(),
+                logs.clone(),
+                finishes.clone(),
+                counts.clone(),
+                maxes.clone(),
+            );
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buffer = [0; 2048];
+                while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                    let n = socket.read(&mut buffer).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let request = String::from_utf8_lossy(&request).to_ascii_lowercase();
+                let range = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="));
+                let (start, end) = range
+                    .map(|value| {
+                        let (start, end) = value.trim().split_once('-').unwrap();
+                        (
+                            start.parse::<usize>().unwrap(),
+                            if end.is_empty() {
+                                body.len() - 1
+                            } else {
+                                end.parse().unwrap()
+                            },
+                        )
+                    })
+                    .unwrap_or((0, body.len() - 1));
+                assert!(start <= end && end < body.len());
+                if range.is_some() {
+                    requests.lock().push((start, end));
+                }
+                let mode = fault.load(Ordering::SeqCst);
+                let segmented = range.is_some() && end > start;
+                let status = if range.is_some() && !(segmented && mode == 2) {
+                    206
+                } else {
+                    200
+                };
+                let etag = if mode == 6 {
+                    "W/\"seg-v1\""
+                } else if segmented && (mode == 1 || mode == 9 && start == 0) {
+                    "\"changed\""
+                } else {
+                    "\"seg-v1\""
+                };
+                let (payload_start, payload_end) = if status == 200 {
+                    (0, body.len() - 1)
+                } else {
+                    (start, end)
+                };
+                let total = body.len() + usize::from(segmented && mode == 3);
+                let reported_end = end + usize::from(segmented && mode == 5);
+                let content_range = if status == 206 {
+                    format!("Content-Range: bytes {start}-{reported_end}/{total}\r\n")
+                } else {
+                    String::new()
+                };
+                let accepts = if mode == 4 {
+                    ""
+                } else {
+                    "Accept-Ranges: bytes\r\n"
+                };
+                let header = format!(
+                    "HTTP/1.1 {status} OK\r\n{accepts}ETag: {etag}\r\n{content_range}Content-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload_end - payload_start + 1
+                );
+                if socket.write_all(header.as_bytes()).await.is_err() {
+                    return;
+                }
+                if mode == 8 && end == start || mode == 9 && segmented && start > 0 {
+                    let _ = socket.read(&mut buffer).await;
+                    return;
+                }
+                struct ActiveGuard(Arc<AtomicUsize>);
+                impl Drop for ActiveGuard {
+                    fn drop(&mut self) {
+                        self.0.fetch_sub(1, Ordering::SeqCst);
+                    }
+                }
+                let _guard = if segmented {
+                    let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(count, Ordering::SeqCst);
+                    Some(ActiveGuard(active))
+                } else {
+                    None
+                };
+                if segmented && start == 0 {
+                    tokio::time::sleep(Duration::from_millis(35)).await;
+                }
+                for chunk in body[payload_start..=payload_end].chunks(64 * 1024) {
+                    if !delay.is_zero() {
+                        tokio::time::sleep(delay).await;
+                    }
+                    if socket.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                }
+                if segmented {
+                    completions.lock().push(start);
+                }
+            });
+        }
+    });
+    SegmentFixture {
+        url,
+        body,
+        fault,
+        requests,
+        completions,
+        active,
+        peak,
+        server,
+    }
+}
+
+fn segmented_settings(mgr: &DownloadManager, connections: u32) {
+    mgr.update_settings(UpdateSettingsRequest {
+        max_connections_per_download: Some(connections),
+        ..Default::default()
+    })
+    .unwrap();
+}
+fn create_segment_task(
+    mgr: &DownloadManager,
+    fixture: &SegmentFixture,
+) -> crate::domain::DownloadTask {
+    mgr.create(CreateDownloadRequest {
+        url: fixture.url.clone(),
+        destination_id: None,
+        suggested_name: Some("seg.bin".into()),
+        start_now: true,
+        request_id: None,
+        expected_sha256: Some(sha256_hex(&fixture.body)),
+    })
+    .unwrap()
+}
+async fn wait_segment_progress(mgr: &DownloadManager, id: &str) {
+    for _ in 0..400 {
+        let task = mgr.get(id).unwrap();
+        if task.transfer_mode == crate::domain::TransferMode::Segmented && task.downloaded_bytes > 0
+        {
+            return;
+        }
+        assert_ne!(task.status, DownloadStatus::Failed, "{:?}", task.error);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("no segment progress");
+}
+
+#[tokio::test]
+async fn segmented_out_of_order_download_assembles_byte_identical_file_and_cleans_parts() {
+    use std::sync::atomic::Ordering;
+    let fixture = segment_fixture(Duration::from_millis(2), 0).await;
+    let (dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &fixture);
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(12),
+    )
+    .await;
+    let done = mgr.get(&task.id).unwrap();
+    assert_eq!(done.transfer_mode, crate::domain::TransferMode::Segmented);
+    assert_eq!(
+        done.actual_sha256.as_deref(),
+        Some(sha256_hex(&fixture.body).as_str())
+    );
+    assert_eq!(done.checksum_result.as_deref(), Some("matched"));
+    assert_eq!(
+        std::fs::read(done.final_path.unwrap()).unwrap(),
+        *fixture.body
+    );
+    assert!(fixture.peak.load(Ordering::SeqCst) <= 4);
+    assert_ne!(
+        *fixture.completions.lock(),
+        vec![0, 2097152, 4194304, 6291456]
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("downloads"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(
+        Database::open(dir.path().join("test.db"))
+            .unwrap()
+            .list_segments(&task.id)
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn incompatible_origins_and_default_setting_use_single_connection() {
+    for (connections, fault) in [(1, 0), (4, 4), (4, 6)] {
+        let fixture = segment_fixture(Duration::ZERO, fault).await;
+        let (_dir, mgr) = manager();
+        segmented_settings(&mgr, connections);
+        let task = create_segment_task(&mgr, &fixture);
+        wait_for_status(
+            &mgr,
+            &task.id,
+            &[DownloadStatus::Completed],
+            Duration::from_secs(12),
+        )
+        .await;
+        let done = mgr.get(&task.id).unwrap();
+        assert_eq!(done.transfer_mode, crate::domain::TransferMode::Single);
+        assert_eq!(
+            std::fs::read(done.final_path.unwrap()).unwrap(),
+            *fixture.body
+        );
+        assert!(
+            fixture
+                .requests
+                .lock()
+                .iter()
+                .all(|(start, end)| start == end)
+        );
+        if connections == 1 {
+            assert!(fixture.requests.lock().is_empty());
+        }
+    }
+}
+
+#[tokio::test]
+async fn segmented_pause_reopen_and_lower_connection_setting_resume_saved_extents() {
+    use std::sync::atomic::Ordering;
+    let fixture = segment_fixture(Duration::from_millis(10), 0).await;
+    let (dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &fixture);
+    wait_segment_progress(&mgr, &task.id).await;
+    mgr.pause(&task.id).await.unwrap();
+    assert_eq!(mgr.get(&task.id).unwrap().status, DownloadStatus::Paused);
+    let db = Database::open(dir.path().join("test.db")).unwrap();
+    let before = db.list_segments(&task.id).unwrap();
+    assert!(
+        before
+            .iter()
+            .any(|s| s.completed_bytes > 0 && s.completed_bytes < s.expected_len())
+    );
+    let paths: Vec<_> = before
+        .iter()
+        .map(|s| {
+            crate::application::segmentation::segment_file_path(
+                task.temp_path.as_ref().unwrap(),
+                s.segment_index,
+            )
+        })
+        .collect();
+    let lengths: Vec<_> = paths
+        .iter()
+        .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+        .collect();
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        lengths,
+        paths
+            .iter()
+            .map(|p| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0))
+            .collect::<Vec<_>>()
+    );
+    drop(mgr);
+    drop(db);
+    let reopened = DownloadManager::new(
+        Database::open(dir.path().join("test.db")).unwrap(),
+        dir.path().join("downloads"),
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
+    reopened.reconcile_on_startup().unwrap();
+    segmented_settings(&reopened, 1);
+    fixture.requests.lock().clear();
+    fixture.peak.store(0, Ordering::SeqCst);
+    assert_eq!(fixture.active.load(Ordering::SeqCst), 0);
+    reopened.resume(&task.id).await.unwrap();
+    wait_for_status(
+        &reopened,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(15),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(reopened.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+        *fixture.body
+    );
+    assert!(fixture.peak.load(Ordering::SeqCst) <= 1);
+    let requests = fixture.requests.lock();
+    for segment in before {
+        if segment.completed_bytes < segment.expected_len() {
+            assert!(requests.contains(&(
+                (segment.start_byte + segment.completed_bytes) as usize,
+                segment.end_byte as usize
+            )));
+        }
+    }
+}
+
+#[tokio::test]
+async fn segmented_identity_and_range_errors_do_not_publish() {
+    for fault in [1, 2, 3, 5] {
+        let fixture = segment_fixture(Duration::from_millis(10), fault).await;
+        let (dir, mgr) = manager();
+        segmented_settings(&mgr, 4);
+        let task = create_segment_task(&mgr, &fixture);
+        wait_for_status(
+            &mgr,
+            &task.id,
+            &[DownloadStatus::Failed],
+            Duration::from_secs(5),
+        )
+        .await;
+        let failed = mgr.get(&task.id).unwrap();
+        assert!(matches!(
+            failed.error.unwrap().code,
+            ErrorCode::ResourceChanged | ErrorCode::RangeUnsupported
+        ));
+        assert!(!std::path::Path::new(failed.final_path.as_ref().unwrap()).exists());
+        assert!(!std::path::Path::new(failed.temp_path.as_ref().unwrap()).exists());
+        assert_eq!(
+            Database::open(dir.path().join("test.db"))
+                .unwrap()
+                .list_segments(&task.id)
+                .unwrap()
+                .len(),
+            4
+        );
+    }
+}
+
+#[tokio::test]
+async fn changed_origin_after_pause_keeps_segment_files_and_fails() {
+    use std::sync::atomic::Ordering;
+    let fixture = segment_fixture(Duration::from_millis(10), 0).await;
+    let (_dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &fixture);
+    wait_segment_progress(&mgr, &task.id).await;
+    mgr.pause(&task.id).await.unwrap();
+    fixture.fault.store(2, Ordering::SeqCst);
+    mgr.resume(&task.id).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(5),
+    )
+    .await;
+    let failed = mgr.get(&task.id).unwrap();
+    assert_eq!(failed.error.unwrap().code, ErrorCode::ResourceChanged);
+    assert!(!std::path::Path::new(failed.final_path.as_ref().unwrap()).exists());
+    assert!(
+        std::fs::metadata(crate::application::segmentation::segment_file_path(
+            task.temp_path.as_ref().unwrap(),
+            0
+        ))
+        .unwrap()
+        .len()
+            > 0
+    );
+}
+
+#[tokio::test]
+async fn cancellation_interrupts_a_stalled_probe_and_removal_deletes_segment_parts() {
+    let fixture = segment_fixture(Duration::ZERO, 8).await;
+    let (_dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &fixture);
+    for _ in 0..100 {
+        if !fixture.requests.lock().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    tokio::time::timeout(Duration::from_secs(1), mgr.pause(&task.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mgr.get(&task.id).unwrap().status, DownloadStatus::Paused);
+    let slow = segment_fixture(Duration::from_millis(10), 0).await;
+    let (dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &slow);
+    wait_segment_progress(&mgr, &task.id).await;
+    tokio::time::timeout(Duration::from_secs(1), mgr.cancel(&task.id))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(mgr.get(&task.id).unwrap().status, DownloadStatus::Canceled);
+    mgr.remove(RemoveDownloadRequest {
+        id: task.id,
+        delete_partial: true,
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("downloads"))
+            .unwrap()
+            .count(),
+        0
+    );
+}
+
+#[tokio::test]
+#[ignore = "controlled benchmark; run explicitly with --ignored --nocapture"]
+async fn segmented_benchmark_records_medians_under_equivalent_conditions() {
+    let fixture = segment_fixture(Duration::from_millis(3), 0).await;
+    let mut single = Vec::new();
+    let mut multi = Vec::new();
+    // Alternate order to reduce systematic warm-cache/order bias.
+    for round in 0..7 {
+        for connections in if round % 2 == 0 { [1, 4] } else { [4, 1] } {
+            let (_dir, mgr) = manager();
+            segmented_settings(&mgr, connections);
+            let start = std::time::Instant::now();
+            let task = create_segment_task(&mgr, &fixture);
+            wait_for_status(
+                &mgr,
+                &task.id,
+                &[DownloadStatus::Completed],
+                Duration::from_secs(15),
+            )
+            .await;
+            let ms = start.elapsed().as_secs_f64() * 1000.;
+            assert_eq!(
+                std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+                *fixture.body
+            );
+            if connections == 1 {
+                single.push(ms);
+            } else {
+                multi.push(ms);
+            }
+        }
+    }
+    for (name, mut samples) in [("single", single), ("four", multi)] {
+        let raw = samples.clone();
+        samples.sort_by(f64::total_cmp);
+        let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+        let variance =
+            samples.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (samples.len() - 1) as f64;
+        eprintln!(
+            "N4A {name}: samples_ms={raw:?}; median_ms={}; sample_variance_ms2={variance}; min_ms={}; max_ms={}",
+            samples[samples.len() / 2],
+            samples[0],
+            samples[samples.len() - 1]
+        );
+    }
+}
+
+#[tokio::test]
+async fn one_bad_segment_drains_stalled_siblings_promptly() {
+    let fixture = segment_fixture(Duration::ZERO, 9).await;
+    let (_dir, mgr) = manager();
+    segmented_settings(&mgr, 4);
+    let task = create_segment_task(&mgr, &fixture);
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(2),
+    )
+    .await;
+    let failed = mgr.get(&task.id).unwrap();
+    assert_eq!(failed.error.unwrap().code, ErrorCode::ResourceChanged);
+    let db_paths = task.temp_path.as_ref().unwrap();
+    let sizes: Vec<_> = (0..4)
+        .map(|i| {
+            std::fs::metadata(crate::application::segmentation::segment_file_path(
+                db_paths, i,
+            ))
+            .map(|m| m.len())
+            .unwrap_or(0)
+        })
+        .collect();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        sizes,
+        (0..4)
+            .map(
+                |i| std::fs::metadata(crate::application::segmentation::segment_file_path(
+                    db_paths, i
+                ))
+                .map(|m| m.len())
+                .unwrap_or(0)
+            )
+            .collect::<Vec<_>>()
+    );
+}
+
+#[tokio::test]
+async fn opting_in_after_a_single_partial_preserves_suffix_resume() {
+    let fixture = segment_fixture(Duration::from_millis(6), 0).await;
+    let (_dir, mgr) = manager();
+    let task = create_segment_task(&mgr, &fixture);
+    for _ in 0..400 {
+        if mgr.get(&task.id).unwrap().downloaded_bytes > 0 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    mgr.pause(&task.id).await.unwrap();
+    let offset = std::fs::metadata(task.temp_path.as_ref().unwrap())
+        .unwrap()
+        .len();
+    assert!(offset > 0 && offset < fixture.body.len() as u64);
+    segmented_settings(&mgr, 4);
+    fixture.requests.lock().clear();
+    mgr.resume(&task.id).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(12),
+    )
+    .await;
+    let done = mgr.get(&task.id).unwrap();
+    assert_eq!(done.transfer_mode, crate::domain::TransferMode::Single);
+    assert_eq!(
+        *fixture.requests.lock(),
+        vec![(offset as usize, fixture.body.len() - 1)]
+    );
+    assert_eq!(
+        std::fs::read(done.final_path.unwrap()).unwrap(),
+        *fixture.body
+    );
+}
+
+#[tokio::test]
+async fn segmented_downloads_still_share_the_global_task_slot() {
+    use std::sync::atomic::Ordering;
+    let fixture = segment_fixture(Duration::from_millis(3), 0).await;
+    let (_dir, mgr) = manager();
+    mgr.update_settings(UpdateSettingsRequest {
+        max_concurrent_downloads: Some(1),
+        max_connections_per_download: Some(4),
+        ..Default::default()
+    })
+    .unwrap();
+    let first = create_segment_task(&mgr, &fixture);
+    let second = create_segment_task(&mgr, &fixture);
+    wait_for_status(
+        &mgr,
+        &first.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(12),
+    )
+    .await;
+    wait_for_status(
+        &mgr,
+        &second.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(12),
+    )
+    .await;
+    assert!(fixture.peak.load(Ordering::SeqCst) <= 4);
+    for id in [first.id, second.id] {
+        let task = mgr.get(&id).unwrap();
+        assert_eq!(
+            std::fs::read(task.final_path.unwrap()).unwrap(),
+            *fixture.body
+        );
+    }
 }

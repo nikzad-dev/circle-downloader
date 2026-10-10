@@ -20,7 +20,8 @@
     "actualSha256": null,
     "checksumResult": null,
     "retryCount": 3,
-    "nextRetryAt": null
+    "nextRetryAt": null,
+    "transferMode": "single"
   },
   "progress": {
     "taskId": "contract-task",
@@ -34,7 +35,8 @@
   "settings": {
     "maxConcurrentDownloads": 3,
     "defaultDestinationId": "default",
-    "autoStart": true
+    "autoStart": true,
+    "maxConnectionsPerDownload": 1
   },
   "queue": {
     "id": "default",

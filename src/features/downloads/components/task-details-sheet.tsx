@@ -5,6 +5,7 @@ import { ExternalLink, FolderOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
 import { orpc } from '@/lib/orpc/client'
+import { strings } from '@/lib/ui-strings'
 import { downloadErrorMessage } from '../lib/errors'
 import { formatBytes, statusLabels } from '../lib/format'
 import { TaskActions } from './task-actions'
@@ -61,6 +62,14 @@ function DetailsBody({ task }: { task: DownloadTask }) {
           <dd className="mt-1">{task.destinationId === 'default' ? 'App-managed downloads folder' : task.destinationId}</dd>
         </div>
         <div>
+          <dt className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">Transfer</dt>
+          <dd className="mt-1">
+            {task.transferMode === 'segmented'
+              ? strings.transferModeSegmented
+              : strings.transferModeSingle}
+          </dd>
+        </div>
+        <div>
           <dt className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">Retries</dt>
           <dd className="mt-1">
             Attempt
@@ -68,7 +77,7 @@ function DetailsBody({ task }: { task: DownloadTask }) {
             {task.retryCount}
             {' '}
             of 5
-            {task.nextRetryAt ? ` · next at ${new Date(task.nextRetryAt).toLocaleString()}` : ''}
+            {task.nextRetryAt !== null ? ` · next at ${new Date(task.nextRetryAt).toLocaleString()}` : ''}
           </dd>
         </div>
         {task.error && (
@@ -83,7 +92,7 @@ function DetailsBody({ task }: { task: DownloadTask }) {
             </dd>
           </div>
         )}
-        {task.actualSha256 && (
+        {task.actualSha256 !== null && (
           <div>
             <dt className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">Verification</dt>
             <dd className="mt-1 space-y-1">

@@ -80,9 +80,11 @@ describe('nativeCommands', () => {
       maxConcurrentDownloads: 2,
       defaultDestinationId: 'default',
       autoStart: true,
+      maxConnectionsPerDownload: 1,
     })
     await expect(nativeCommands.getSettings()).resolves.toMatchObject({
       maxConcurrentDownloads: 2,
+      maxConnectionsPerDownload: 1,
     })
   })
 

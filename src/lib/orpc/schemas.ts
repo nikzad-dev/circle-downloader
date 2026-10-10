@@ -71,6 +71,7 @@ export const downloadTaskSchema = z.object({
   checksumResult: z.enum(['computed', 'matched', 'mismatch']).nullable().default(null),
   retryCount: z.number().int().nonnegative(),
   nextRetryAt: z.string().min(1).nullable(),
+  transferMode: z.enum(['single', 'segmented']).default('single'),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 })
@@ -111,6 +112,7 @@ export const settingsSchema = z.object({
   maxConcurrentDownloads: z.number().int().min(1).max(32),
   defaultDestinationId: z.string().min(1),
   autoStart: z.boolean(),
+  maxConnectionsPerDownload: z.number().int().min(1).max(4),
 })
 
 export const updateSettingsInputSchema = settingsSchema.partial()

@@ -72,12 +72,13 @@ function AddDownloadForm({
       startNow: true,
     },
   })
+  const defaultDestinationId = settings.data?.defaultDestinationId
   useEffect(() => {
-    if (settings.data?.defaultDestinationId)
-      form.setValue('destinationId', settings.data.defaultDestinationId)
-  }, [settings.data?.defaultDestinationId, form])
+    if (defaultDestinationId !== undefined && defaultDestinationId !== '')
+      form.setValue('destinationId', defaultDestinationId)
+  }, [defaultDestinationId, form])
   useEffect(() => {
-    if (initialUrl)
+    if (initialUrl !== '')
       form.setValue('url', initialUrl)
   }, [initialUrl, form])
   const mutation = useMutation(orpc.downloads.create.mutationOptions())
