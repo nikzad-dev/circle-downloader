@@ -29,31 +29,43 @@ pub fn create_download(
 }
 
 #[tauri::command]
-pub fn pause_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
-    state.manager.pause(&id).map_err(map_err)
+pub async fn pause_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DownloadTask, String> {
+    state.manager.pause(&id).await.map_err(map_err)
 }
 
 #[tauri::command]
-pub fn resume_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
-    state.manager.resume(&id).map_err(map_err)
+pub async fn resume_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DownloadTask, String> {
+    state.manager.resume(&id).await.map_err(map_err)
 }
 
 #[tauri::command]
-pub fn cancel_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
-    state.manager.cancel(&id).map_err(map_err)
+pub async fn cancel_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DownloadTask, String> {
+    state.manager.cancel(&id).await.map_err(map_err)
 }
 
 #[tauri::command]
-pub fn retry_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
-    state.manager.retry(&id).map_err(map_err)
+pub async fn retry_download(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<DownloadTask, String> {
+    state.manager.retry(&id).await.map_err(map_err)
 }
 
 #[tauri::command]
-pub fn remove_download(
+pub async fn remove_download(
     state: State<'_, AppState>,
     input: RemoveDownloadRequest,
 ) -> Result<RemoveDownloadResult, String> {
-    state.manager.remove(input).map_err(map_err)
+    state.manager.remove(input).await.map_err(map_err)
 }
 
 #[tauri::command]

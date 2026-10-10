@@ -6,7 +6,7 @@ use crate::domain::{
     RemoveDownloadRequest, RemoveDownloadResult, Settings, TaskError, UpdateSettingsRequest,
 };
 use crate::infrastructure::db::Database;
-use crate::infrastructure::http::{cancel_pair, download_to_file};
+use crate::infrastructure::http::{ResumeMetadata, cancel_pair, download_to_file};
 use crate::ipc::progress::ProgressHub;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -19,6 +19,7 @@ use uuid::Uuid;
 
 struct WorkerHandle {
     cancel_tx: watch::Sender<bool>,
+    join: tauri::async_runtime::JoinHandle<()>,
 }
 
 #[derive(Clone)]
@@ -32,6 +33,8 @@ struct ManagerInner {
     http: Client,
     progress: ProgressHub,
     workers: Mutex<HashMap<String, WorkerHandle>>,
+    mutations: Mutex<()>,
+    controls: tokio::sync::Mutex<()>,
 }
 
 impl DownloadManager {
@@ -57,6 +60,8 @@ impl DownloadManager {
                 http,
                 progress,
                 workers: Mutex::new(HashMap::new()),
+                mutations: Mutex::new(()),
+                controls: tokio::sync::Mutex::new(()),
             }),
         })
     }
@@ -110,10 +115,11 @@ impl DownloadManager {
     }
 
     pub fn create(&self, req: CreateDownloadRequest) -> Result<DownloadTask, AppError> {
-        if let Some(request_id) = req.request_id.as_deref() {
-            if let Some(existing) = self.inner.db.find_by_request_id(request_id)? {
-                return Ok(existing);
-            }
+        let _mutation = self.inner.mutations.lock();
+        if let Some(request_id) = req.request_id.as_deref()
+            && let Some(existing) = self.inner.db.find_by_request_id(request_id)?
+        {
+            return Ok(existing);
         }
 
         let url = validate_download_url(&req.url)?;
@@ -134,7 +140,13 @@ impl DownloadManager {
             .join(format!(".{id}.{file_name}.part"))
             .to_string_lossy()
             .to_string();
-        let final_path = unique_final_path(&self.inner.download_dir, &file_name)?;
+        let reserved = self.inner.db.list_downloads()?;
+        let final_path = unique_final_path(&self.inner.download_dir, &file_name, &reserved)?;
+        let file_name = final_path
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .into_owned();
 
         let start_now = req.start_now && settings.auto_start;
         let mut task = DownloadTask {
@@ -171,38 +183,27 @@ impl DownloadManager {
         Ok(task)
     }
 
-    pub fn pause(&self, id: &str) -> Result<DownloadTask, AppError> {
-        let mut task = self.inner.db.get_download(id)?;
-        ensure_transition(task.status, DownloadStatus::Paused)?;
-        self.cancel_worker(id);
-        // Wait briefly for worker to notice cancellation before persisting pause,
-        // but don't require worker exit — status wins.
-        task = self.inner.db.get_download(id)?;
-        if task.status != DownloadStatus::Paused {
-            ensure_transition(task.status, DownloadStatus::Paused)?;
-            task.status = DownloadStatus::Paused;
-            task.speed_bytes_per_second = 0;
-            task.error = None;
-            task.bump_revision();
-            // Refresh on-disk bytes if temp exists
-            if let Some(temp) = &task.temp_path {
-                if let Ok(meta) = std::fs::metadata(temp) {
-                    task.downloaded_bytes = meta.len();
-                }
-            }
-            self.inner.db.upsert_download(&task)?;
-            self.emit_progress(&task);
-        }
-        Ok(task)
+    pub async fn pause(&self, id: &str) -> Result<DownloadTask, AppError> {
+        let _control = self.inner.controls.lock().await;
+        self.set_stopped_status(id, DownloadStatus::Paused)?;
+        self.stop_worker(id).await;
+        self.refresh_partial(id)
     }
 
-    pub fn resume(&self, id: &str) -> Result<DownloadTask, AppError> {
+    pub async fn resume(&self, id: &str) -> Result<DownloadTask, AppError> {
+        let _control = self.inner.controls.lock().await;
+        ensure_transition(
+            self.inner.db.get_download(id)?.status,
+            DownloadStatus::Queued,
+        )?;
+        self.stop_worker(id).await;
+        let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
         ensure_transition(task.status, DownloadStatus::Queued)?;
-        if let Some(temp) = &task.temp_path {
-            if let Ok(meta) = std::fs::metadata(temp) {
-                task.downloaded_bytes = meta.len();
-            }
+        if let Some(temp) = &task.temp_path
+            && let Ok(meta) = std::fs::metadata(temp)
+        {
+            task.downloaded_bytes = meta.len();
         }
         task.status = DownloadStatus::Queued;
         task.error = None;
@@ -210,29 +211,53 @@ impl DownloadManager {
         self.inner.db.upsert_download(&task)?;
         self.emit_progress(&task);
         self.spawn_worker(task.id.clone());
-        self.inner.db.get_download(id)
+        Ok(task)
     }
 
-    pub fn cancel(&self, id: &str) -> Result<DownloadTask, AppError> {
+    pub async fn cancel(&self, id: &str) -> Result<DownloadTask, AppError> {
+        let _control = self.inner.controls.lock().await;
+        self.set_stopped_status(id, DownloadStatus::Canceled)?;
+        self.stop_worker(id).await;
+        self.refresh_partial(id)
+    }
+
+    fn set_stopped_status(&self, id: &str, status: DownloadStatus) -> Result<(), AppError> {
+        let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
-        if task.status.is_terminal() {
-            return Err(AppError::new(
-                ErrorCode::InvalidTransition,
-                format!("Cannot cancel task in status {}", task.status.as_str()),
-            ));
-        }
-        ensure_transition(task.status, DownloadStatus::Canceled)?;
-        self.cancel_worker(id);
-        task.status = DownloadStatus::Canceled;
+        ensure_transition(task.status, status)?;
+        task.status = status;
         task.speed_bytes_per_second = 0;
         task.error = None;
         task.bump_revision();
         self.inner.db.upsert_download(&task)?;
         self.emit_progress(&task);
+        Ok(())
+    }
+
+    fn refresh_partial(&self, id: &str) -> Result<DownloadTask, AppError> {
+        let _mutation = self.inner.mutations.lock();
+        let mut task = self.inner.db.get_download(id)?;
+        if let Some(temp) = &task.temp_path
+            && let Ok(meta) = std::fs::metadata(temp)
+        {
+            task.downloaded_bytes = meta.len();
+            task.bump_revision();
+            self.inner.db.upsert_download(&task)?;
+            self.emit_progress(&task);
+        }
         Ok(task)
     }
 
-    pub fn retry(&self, id: &str) -> Result<DownloadTask, AppError> {
+    pub async fn retry(&self, id: &str) -> Result<DownloadTask, AppError> {
+        let _control = self.inner.controls.lock().await;
+        if self.inner.db.get_download(id)?.status != DownloadStatus::Failed {
+            return Err(AppError::new(
+                ErrorCode::InvalidTransition,
+                "Only failed tasks can be retried",
+            ));
+        }
+        self.stop_worker(id).await;
+        let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
         if task.status != DownloadStatus::Failed {
             return Err(AppError::new(
@@ -248,18 +273,33 @@ impl DownloadManager {
         self.inner.db.upsert_download(&task)?;
         self.emit_progress(&task);
         self.spawn_worker(task.id.clone());
-        self.inner.db.get_download(id)
+        Ok(task)
     }
 
-    pub fn remove(&self, req: RemoveDownloadRequest) -> Result<RemoveDownloadResult, AppError> {
-        let task = self.inner.db.get_download(&req.id)?;
-        if task.status.is_active() {
-            self.cancel_worker(&req.id);
-        }
-        if req.delete_partial {
-            if let Some(temp) = &task.temp_path {
-                let _ = std::fs::remove_file(temp);
+    pub async fn remove(
+        &self,
+        req: RemoveDownloadRequest,
+    ) -> Result<RemoveDownloadResult, AppError> {
+        let _control = self.inner.controls.lock().await;
+        // Block callbacks before stopping and draining the writer.
+        {
+            let _mutation = self.inner.mutations.lock();
+            let mut task = self.inner.db.get_download(&req.id)?;
+            if task.status.is_active() {
+                task.status = DownloadStatus::Canceled;
+                task.bump_revision();
+                self.inner.db.upsert_download(&task)?;
             }
+        }
+        self.stop_worker(&req.id).await;
+        let _mutation = self.inner.mutations.lock();
+        let task = self.inner.db.get_download(&req.id)?;
+        if req.delete_partial
+            && let Some(temp) = &task.temp_path
+            && let Err(error) = std::fs::remove_file(temp)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(crate::infrastructure::http::map_io_err(error));
         }
         self.inner.db.remove_download(&req.id)?;
         Ok(RemoveDownloadResult { removed: true })
@@ -277,25 +317,25 @@ impl DownloadManager {
         self.inner.db.list_queues()
     }
 
-    fn cancel_worker(&self, id: &str) {
-        if let Some(handle) = self.inner.workers.lock().remove(id) {
+    async fn stop_worker(&self, id: &str) {
+        let handle = self.inner.workers.lock().remove(id);
+        if let Some(handle) = handle {
             let _ = handle.cancel_tx.send(true);
+            let _ = handle.join.await;
         }
     }
 
     fn spawn_worker(&self, task_id: String) {
         let inner = Arc::clone(&self.inner);
         let (cancel_tx, cancel_token) = cancel_pair();
-        self.inner.workers.lock().insert(
-            task_id.clone(),
-            WorkerHandle {
-                cancel_tx: cancel_tx.clone(),
-            },
-        );
-
-        tauri::async_runtime::spawn(async move {
-            run_download_job(inner, task_id, cancel_token).await;
+        // Hold registry until insertion so a fast worker cannot leave a stale entry.
+        let mut workers = self.inner.workers.lock();
+        let worker_id = task_id.clone();
+        let join = tauri::async_runtime::spawn(async move {
+            run_download_job(inner.clone(), worker_id.clone(), cancel_token).await;
+            inner.workers.lock().remove(&worker_id);
         });
+        workers.insert(task_id, WorkerHandle { cancel_tx, join });
     }
 
     fn emit_progress(&self, task: &DownloadTask) {
@@ -317,7 +357,7 @@ async fn run_download_job(
     cancel: crate::infrastructure::http::CancelToken,
 ) {
     let result = execute_download(&inner, &task_id, &cancel).await;
-    inner.workers.lock().remove(&task_id);
+    let _mutation = inner.mutations.lock();
 
     match result {
         Ok(()) => {}
@@ -363,20 +403,24 @@ async fn execute_download(
     task_id: &str,
     cancel: &crate::infrastructure::http::CancelToken,
 ) -> Result<(), AppError> {
-    let mut task = inner.db.get_download(task_id)?;
-    if task.status == DownloadStatus::Queued {
-        ensure_transition(task.status, DownloadStatus::Connecting)?;
-        task.status = DownloadStatus::Connecting;
-        task.bump_revision();
-        inner.db.upsert_download(&task)?;
-        emit(inner, &task);
-    } else if task.status != DownloadStatus::Connecting {
-        return Err(AppError::new(
-            ErrorCode::InvalidTransition,
-            format!("Worker cannot start from status {}", task.status.as_str()),
-        ));
-    }
+    let mut task = {
+        let _mutation = inner.mutations.lock();
+        let mut task = inner.db.get_download(task_id)?;
+        if task.status == DownloadStatus::Queued {
+            ensure_transition(task.status, DownloadStatus::Connecting)?;
+            task.status = DownloadStatus::Connecting;
+            task.bump_revision();
+            inner.db.upsert_download(&task)?;
+            emit(inner, &task);
+        } else if task.status != DownloadStatus::Connecting {
+            return Err(AppError::new(
+                ErrorCode::InvalidTransition,
+                format!("Worker cannot start from status {}", task.status.as_str()),
+            ));
+        }
 
+        task
+    };
     let temp_path = task
         .temp_path
         .clone()
@@ -393,52 +437,61 @@ async fn execute_download(
     };
     task.downloaded_bytes = resume_from;
 
-    ensure_transition(task.status, DownloadStatus::Downloading)?;
-    task.status = DownloadStatus::Downloading;
-    task.bump_revision();
-    inner.db.upsert_download(&task)?;
-    emit(inner, &task);
-
-    let progress = inner.progress.clone();
-    let db = inner.db.clone();
-    let task_id_owned = task_id.to_string();
+    {
+        let _mutation = inner.mutations.lock();
+        task = inner.db.get_download(task_id)?;
+        ensure_transition(task.status, DownloadStatus::Downloading)?;
+        task.status = DownloadStatus::Downloading;
+        task.bump_revision();
+        inner.db.upsert_download(&task)?;
+        emit(inner, &task);
+    }
 
     let download = download_to_file(
         &inner.http,
         &task.url,
         Path::new(&temp_path),
-        resume_from,
-        task.etag.as_deref(),
+        ResumeMetadata {
+            offset: resume_from,
+            etag: task.etag.clone(),
+        },
         cancel,
-        move |update| {
-            if let Ok(mut current) = db.get_download(&task_id_owned) {
-                if matches!(
-                    current.status,
-                    DownloadStatus::Canceled | DownloadStatus::Paused
-                ) {
-                    return;
-                }
+        |metadata| {
+            let _mutation = inner.mutations.lock();
+            let mut current = inner.db.get_download(task_id)?;
+            if current.status != DownloadStatus::Downloading {
+                return Err(AppError::new(
+                    ErrorCode::InvalidTransition,
+                    "Download canceled",
+                ));
+            }
+            current.etag = metadata.etag.clone();
+            current.last_modified = metadata.last_modified.clone();
+            current.total_bytes = metadata.total_bytes;
+            current.bump_revision();
+            inner.db.upsert_download(&current)?;
+            emit(inner, &current);
+            Ok(())
+        },
+        |update| {
+            let _mutation = inner.mutations.lock();
+            if let Ok(mut current) = inner.db.get_download(task_id)
+                && current.status == DownloadStatus::Downloading
+            {
                 current.downloaded_bytes = update.transferred_bytes;
                 current.total_bytes = update.total_bytes.or(current.total_bytes);
                 current.speed_bytes_per_second = update.bytes_per_second;
-                current.status = DownloadStatus::Downloading;
                 current.bump_revision();
-                let _ = db.upsert_download(&current);
-                progress.emit(ProgressEvent {
-                    task_id: current.id.clone(),
-                    revision: current.revision,
-                    transferred_bytes: current.downloaded_bytes,
-                    total_bytes: current.total_bytes,
-                    bytes_per_second: current.speed_bytes_per_second,
-                    status: current.status,
-                    timestamp: Utc::now(),
-                });
+                if inner.db.upsert_download(&current).is_ok() {
+                    emit(inner, &current);
+                }
             }
         },
     )
     .await;
 
-    // If paused/canceled meanwhile, stop without failing.
+    let _mutation = inner.mutations.lock();
+    // Stop and finalization share a mutation boundary; neither can resurrect the other.
     let latest = inner.db.get_download(task_id)?;
     if matches!(
         latest.status,
@@ -454,29 +507,36 @@ async fn execute_download(
     task.status = DownloadStatus::Verifying;
     task.downloaded_bytes = result.bytes_written;
     task.total_bytes = result.total_bytes.or(task.total_bytes);
-    task.etag = result.etag.or(task.etag);
-    task.last_modified = result.last_modified.or(task.last_modified);
     task.speed_bytes_per_second = 0;
     task.bump_revision();
     inner.db.upsert_download(&task)?;
     emit(inner, &task);
 
-    if let Some(total) = task.total_bytes {
-        if task.downloaded_bytes != total {
-            return Err(AppError::new(
-                ErrorCode::ChecksumMismatch,
-                format!(
-                    "Byte length mismatch: got {} expected {total}",
-                    task.downloaded_bytes
-                ),
-            ));
-        }
+    if let Some(total) = task.total_bytes
+        && task.downloaded_bytes != total
+    {
+        return Err(AppError::new(
+            ErrorCode::ChecksumMismatch,
+            format!(
+                "Byte length mismatch: got {} expected {total}",
+                task.downloaded_bytes
+            ),
+        ));
     }
 
-    // Atomic rename within same directory.
-    tokio::fs::rename(&temp_path, &final_path)
-        .await
-        .map_err(|e| AppError::new(ErrorCode::PathNotAllowed, format!("Finalize failed: {e}")))?;
+    // A hard link publishes the complete file atomically without replacing an existing path.
+    // Both names are in the managed directory and therefore on the same filesystem.
+    std::fs::hard_link(&temp_path, &final_path).map_err(|error| {
+        if error.kind() == std::io::ErrorKind::AlreadyExists {
+            AppError::new(
+                ErrorCode::AlreadyExists,
+                "The destination filename is already in use; the partial file was kept",
+            )
+        } else {
+            crate::infrastructure::http::map_io_err(error)
+        }
+    })?;
+    std::fs::remove_file(&temp_path).map_err(crate::infrastructure::http::map_io_err)?;
 
     let mut task = inner.db.get_download(task_id)?;
     ensure_transition(task.status, DownloadStatus::Completed)?;
@@ -503,9 +563,19 @@ fn emit(inner: &ManagerInner, task: &DownloadTask) {
     });
 }
 
-fn unique_final_path(dir: &Path, file_name: &str) -> Result<PathBuf, AppError> {
+fn unique_final_path(
+    dir: &Path,
+    file_name: &str,
+    reserved: &[DownloadTask],
+) -> Result<PathBuf, AppError> {
+    let available = |path: &Path| {
+        std::fs::symlink_metadata(path).is_err_and(|e| e.kind() == std::io::ErrorKind::NotFound)
+            && !reserved
+                .iter()
+                .any(|task| task.final_path.as_deref() == path.to_str())
+    };
     let candidate = dir.join(file_name);
-    if !candidate.exists() {
+    if available(&candidate) {
         return Ok(candidate);
     }
     let stem = Path::new(file_name)
@@ -519,7 +589,7 @@ fn unique_final_path(dir: &Path, file_name: &str) -> Result<PathBuf, AppError> {
         .unwrap_or_default();
     for i in 1..10_000 {
         let path = dir.join(format!("{stem} ({i}){ext}"));
-        if !path.exists() {
+        if available(&path) {
             return Ok(path);
         }
     }

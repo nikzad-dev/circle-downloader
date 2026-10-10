@@ -201,7 +201,7 @@ async fn cancel_mid_download_is_not_completed() {
         .unwrap();
 
     tokio::time::sleep(Duration::from_millis(30)).await;
-    let canceled = mgr.cancel(&task.id).unwrap();
+    let canceled = mgr.cancel(&task.id).await.unwrap();
     assert_eq!(canceled.status, DownloadStatus::Canceled);
 }
 
@@ -225,7 +225,7 @@ async fn cancel_completed_is_invalid_transition() {
         Duration::from_secs(10),
     )
     .await;
-    let err = mgr.cancel(&task.id).unwrap_err();
+    let err = mgr.cancel(&task.id).await.unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidTransition);
 }
 
@@ -244,10 +244,12 @@ async fn pause_resume_retry_remove() {
 
     assert_eq!(task.status, DownloadStatus::Paused);
 
-    let _ = mgr.remove(RemoveDownloadRequest {
-        id: task.id,
-        delete_partial: true,
-    });
+    let _ = mgr
+        .remove(RemoveDownloadRequest {
+            id: task.id,
+            delete_partial: true,
+        })
+        .await;
 
     let bad = mgr
         .create(CreateDownloadRequest {
@@ -266,10 +268,10 @@ async fn pause_resume_retry_remove() {
     )
     .await;
 
-    let illegal = mgr.pause(&bad.id).unwrap_err();
+    let illegal = mgr.pause(&bad.id).await.unwrap_err();
     assert_eq!(illegal.code, ErrorCode::InvalidTransition);
 
-    let retried = mgr.retry(&bad.id).unwrap();
+    let retried = mgr.retry(&bad.id).await.unwrap();
     assert!(matches!(
         retried.status,
         DownloadStatus::Queued
@@ -291,6 +293,7 @@ async fn pause_resume_retry_remove() {
             id: bad.id.clone(),
             delete_partial: true,
         })
+        .await
         .unwrap();
     assert!(removed.removed);
     assert_eq!(mgr.get(&bad.id).unwrap_err().code, ErrorCode::TaskNotFound);
@@ -319,7 +322,7 @@ async fn range_200_does_not_corrupt_partial() {
     let temp = task.temp_path.clone().unwrap();
     std::fs::write(&temp, b"PART").unwrap();
     assert_eq!(task.status, DownloadStatus::Paused);
-    let _ = mgr.resume(&task.id).unwrap();
+    let _ = mgr.resume(&task.id).await.unwrap();
     wait_for_status(
         &mgr,
         &task.id,
@@ -418,7 +421,7 @@ async fn deferred_download_is_paused_and_resumable() {
     assert_eq!(task.status, DownloadStatus::Paused);
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(mgr.get(&task.id).unwrap().downloaded_bytes, 0);
-    mgr.resume(&task.id).unwrap();
+    mgr.resume(&task.id).await.unwrap();
     wait_for_status(
         &mgr,
         &task.id,
@@ -468,4 +471,264 @@ fn native_sync_command_can_start_worker_without_tokio_context() {
         assert!(start.elapsed() < Duration::from_secs(5), "worker never ran");
         std::thread::sleep(Duration::from_millis(10));
     }
+}
+
+async fn spawn_slow_range_server(body: Vec<u8>) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let body = std::sync::Arc::new(body);
+    tokio::spawn(async move {
+        while let Ok((mut socket, _)) = listener.accept().await {
+            let body = body.clone();
+            tokio::spawn(async move {
+                let mut request = Vec::new();
+                let mut buffer = [0; 1024];
+                while !request.ends_with(b"\r\n\r\n") {
+                    let n = socket.read(&mut buffer).await.unwrap_or(0);
+                    if n == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                }
+                let request = String::from_utf8_lossy(&request).to_lowercase();
+                let offset = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                    .and_then(|value| value.trim_end_matches('-').parse::<usize>().ok())
+                    .unwrap_or(0);
+                if offset >= body.len() {
+                    return;
+                }
+                let range = if offset > 0 {
+                    format!(
+                        "Content-Range: bytes {offset}-{}/{}\r\n",
+                        body.len() - 1,
+                        body.len()
+                    )
+                } else {
+                    String::new()
+                };
+                let status = if offset > 0 { 206 } else { 200 };
+                let headers = format!(
+                    "HTTP/1.1 {status} OK\r\nContent-Length: {}\r\nETag: \"fixture-v1\"\r\n{range}Connection: close\r\n\r\n",
+                    body.len() - offset
+                );
+                if socket.write_all(headers.as_bytes()).await.is_err() {
+                    return;
+                }
+                for chunk in body[offset..].chunks(4096) {
+                    if socket.write_all(chunk).await.is_err() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(5)).await;
+                }
+            });
+        }
+    });
+    format!("http://{address}/file.bin")
+}
+
+#[tokio::test]
+async fn rapid_pause_resume_drains_each_writer_and_preserves_identity() {
+    let bytes: Vec<u8> = (0..256_000).map(|index| (index % 251) as u8).collect();
+    let url = spawn_slow_range_server(bytes.clone()).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: None,
+            start_now: true,
+            request_id: None,
+        })
+        .unwrap();
+    for _ in 0..5 {
+        wait_for_status(
+            &mgr,
+            &task.id,
+            &[DownloadStatus::Downloading],
+            Duration::from_secs(3),
+        )
+        .await;
+        tokio::time::sleep(Duration::from_millis(12)).await;
+        let paused = mgr.pause(&task.id).await.unwrap();
+        assert_eq!(paused.status, DownloadStatus::Paused);
+        assert_eq!(paused.etag.as_deref(), Some("\"fixture-v1\""));
+        let path = paused.temp_path.as_ref().unwrap();
+        let length = std::fs::metadata(path).unwrap().len();
+        assert_eq!(paused.downloaded_bytes, length);
+        tokio::time::sleep(Duration::from_millis(15)).await;
+        assert_eq!(
+            std::fs::metadata(path).unwrap().len(),
+            length,
+            "paused writer must be drained"
+        );
+        mgr.resume(&task.id).await.unwrap();
+    }
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(5),
+    )
+    .await;
+    let completed = mgr.get(&task.id).unwrap();
+    assert_eq!(std::fs::read(completed.final_path.unwrap()).unwrap(), bytes);
+}
+
+#[tokio::test]
+async fn remove_during_transfer_cannot_recreate_task_or_partial() {
+    let url = spawn_slow_range_server(vec![7; 512_000]).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: None,
+            start_now: true,
+            request_id: None,
+        })
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Downloading],
+        Duration::from_secs(3),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    mgr.remove(RemoveDownloadRequest {
+        id: task.id.clone(),
+        delete_partial: true,
+    })
+    .await
+    .unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(mgr.get(&task.id).unwrap_err().code, ErrorCode::TaskNotFound);
+    assert!(!std::path::Path::new(task.temp_path.as_ref().unwrap()).exists());
+    assert!(!std::path::Path::new(task.final_path.as_ref().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn finalization_never_replaces_a_file_that_appears_during_transfer() {
+    let url = spawn_fixture_server(|_| (200, b"download".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: Some("external.bin".into()),
+            start_now: false,
+            request_id: None,
+        })
+        .unwrap();
+    let final_path = task.final_path.as_ref().unwrap();
+    std::fs::write(final_path, b"external owner").unwrap();
+    mgr.resume(&task.id).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        mgr.get(&task.id).unwrap().error.unwrap().code,
+        ErrorCode::AlreadyExists
+    );
+    assert_eq!(std::fs::read(final_path).unwrap(), b"external owner");
+    assert_eq!(std::fs::read(task.temp_path.unwrap()).unwrap(), b"download");
+}
+
+#[test]
+fn simultaneous_creates_reserve_names_and_request_ids() {
+    let (_dir, mgr) = manager();
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let threads: Vec<_> = (0..8)
+        .map(|index| {
+            let mgr = mgr.clone();
+            let barrier = barrier.clone();
+            std::thread::spawn(move || {
+                barrier.wait();
+                mgr.create(CreateDownloadRequest {
+                    url: "https://example.com/file.bin".into(),
+                    destination_id: None,
+                    suggested_name: Some("file.bin".into()),
+                    start_now: false,
+                    request_id: Some(format!("request-{}", index / 2)),
+                })
+                .unwrap()
+            })
+        })
+        .collect();
+    for thread in threads {
+        thread.join().unwrap();
+    }
+    let tasks = mgr.list().unwrap();
+    assert_eq!(tasks.len(), 4);
+    let names: std::collections::HashSet<_> = tasks
+        .iter()
+        .map(|task| task.final_path.clone().unwrap())
+        .collect();
+    assert_eq!(names.len(), 4);
+    for task in tasks {
+        assert_eq!(
+            std::path::Path::new(&task.final_path.unwrap())
+                .file_name()
+                .unwrap()
+                .to_str()
+                .unwrap(),
+            task.file_name
+        );
+    }
+}
+
+#[tokio::test]
+async fn invalid_or_duplicate_start_actions_do_not_cancel_the_valid_writer() {
+    let bytes = vec![9; 256_000];
+    let url = spawn_slow_range_server(bytes.clone()).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+        })
+        .unwrap();
+    let (first, second) = tokio::join!(mgr.resume(&task.id), mgr.resume(&task.id));
+    assert_ne!(first.is_ok(), second.is_ok());
+    let error = if let Err(error) = first {
+        error
+    } else {
+        second.unwrap_err()
+    };
+    assert_eq!(error.code, ErrorCode::InvalidTransition);
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Downloading],
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        mgr.resume(&task.id).await.unwrap_err().code,
+        ErrorCode::InvalidTransition
+    );
+    assert_eq!(
+        mgr.retry(&task.id).await.unwrap_err().code,
+        ErrorCode::InvalidTransition
+    );
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+        bytes
+    );
 }

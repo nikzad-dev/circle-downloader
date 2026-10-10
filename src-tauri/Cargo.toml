@@ -1,7 +1,8 @@
 [package]
 name = "circle-downloader"
 version = "0.1.0"
-description = "A Tauri App"
+description = "A local-first desktop download manager"
+license = "GPL-3.0-or-later"
 authors = [ "Alireza Nikzad" ]
 edition = "2024"
 

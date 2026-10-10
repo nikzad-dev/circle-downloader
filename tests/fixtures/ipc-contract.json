@@ -1,0 +1,47 @@
+{
+  "task": {
+    "id": "contract-task",
+    "url": "https://example.com/contract.bin",
+    "fileName": "contract.bin",
+    "destinationId": "default",
+    "status": "failed",
+    "downloadedBytes": 4096,
+    "totalBytes": null,
+    "speedBytesPerSecond": 0,
+    "revision": 7,
+    "error": {
+      "code": "DISK_FULL",
+      "message": "Fixture storage error",
+      "retryable": true
+    },
+    "createdAt": "2026-10-10T00:00:00Z",
+    "updatedAt": "2026-10-10T00:00:00Z"
+  },
+  "progress": {
+    "taskId": "contract-task",
+    "revision": 7,
+    "transferredBytes": 4096,
+    "totalBytes": 8192,
+    "bytesPerSecond": 2048,
+    "status": "downloading",
+    "timestamp": "2026-10-10T00:00:00Z"
+  },
+  "settings": {
+    "maxConcurrentDownloads": 3,
+    "defaultDestinationId": "default",
+    "autoStart": true
+  },
+  "queue": {
+    "id": "default",
+    "name": "Default",
+    "taskCount": 2
+  },
+  "remove": {
+    "removed": true
+  },
+  "error": {
+    "code": "DISK_FULL",
+    "message": "Fixture storage error",
+    "retryable": true
+  }
+}

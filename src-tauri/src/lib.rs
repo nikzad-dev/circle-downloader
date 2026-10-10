@@ -69,3 +69,6 @@ pub fn run() {
 
 #[cfg(test)]
 mod api_tests;
+
+#[cfg(test)]
+mod contract_tests;
