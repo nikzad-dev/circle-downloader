@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { createRouter, RouterProvider } from '@tanstack/react-router'
+import { Toaster } from '@/components/ui/toast'
 import { routeTree } from '../routeTree.gen'
 
 const queryClient = new QueryClient({
@@ -30,6 +31,7 @@ export function AppProviders() {
   return (
     <QueryClientProvider client={queryClient}>
       <RouterProvider router={router} />
+      <Toaster />
     </QueryClientProvider>
   )
 }

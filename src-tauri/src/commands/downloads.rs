@@ -1,19 +1,72 @@
-use serde::Serialize;
+use crate::application::DownloadManager;
+use crate::domain::{
+    CreateDownloadRequest, DownloadTask, ProgressEvent, RemoveDownloadRequest, RemoveDownloadResult,
+};
+use crate::AppState;
+use tauri::ipc::Channel;
+use tauri::State;
 
-/// Placeholder data model. Replace list_downloads with an actual service/database read.
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct DownloadTask {
-    pub id: String,
-    pub url: String,
-    pub file_name: String,
-    pub status: String,
-    pub downloaded_bytes: u64,
-    pub total_bytes: Option<u64>,
+fn map_err(err: crate::domain::AppError) -> String {
+    err.into()
 }
 
 #[tauri::command]
-pub fn list_downloads() -> Vec<DownloadTask> {
-    // Setup test only: downloading/persistence is deliberately not implemented.
-    Vec::new()
+pub fn list_downloads(state: State<'_, AppState>) -> Result<Vec<DownloadTask>, String> {
+    state.manager.list().map_err(map_err)
+}
+
+#[tauri::command]
+pub fn get_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
+    state.manager.get(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn create_download(
+    state: State<'_, AppState>,
+    input: CreateDownloadRequest,
+) -> Result<DownloadTask, String> {
+    state.manager.create(input).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn pause_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
+    state.manager.pause(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn resume_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
+    state.manager.resume(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn cancel_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
+    state.manager.cancel(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn retry_download(state: State<'_, AppState>, id: String) -> Result<DownloadTask, String> {
+    state.manager.retry(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn remove_download(
+    state: State<'_, AppState>,
+    input: RemoveDownloadRequest,
+) -> Result<RemoveDownloadResult, String> {
+    state.manager.remove(input).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn subscribe_progress(
+    state: State<'_, AppState>,
+    on_event: Channel<ProgressEvent>,
+) -> Result<(), String> {
+    state.manager.progress_hub().subscribe(on_event);
+    Ok(())
+}
+
+/// Test helper re-export surface — not a command.
+#[allow(dead_code)]
+pub fn manager_from_state(state: &AppState) -> &DownloadManager {
+    &state.manager
 }
