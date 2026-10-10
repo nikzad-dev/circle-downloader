@@ -16,12 +16,56 @@ pub enum ErrorCode {
     ResourceChanged,
     RangeUnsupported,
     ChecksumMismatch,
+    LengthMismatch,
+    UrlNotAllowed,
     TaskNotFound,
     InvalidTransition,
+    DataDirectoryInUse,
+    NetworkConnection,
+    NetworkInterrupted,
+    TlsError,
+    HttpNotFound,
+    HttpClientError,
+    HttpServerError,
+    HttpRedirect,
+    StoragePermission,
+    StorageNotFound,
+    StorageError,
     Internal,
 }
 
 impl ErrorCode {
+    pub const ALL: &[Self] = &[
+        Self::InvalidUrl,
+        Self::UnsupportedScheme,
+        Self::PathNotAllowed,
+        Self::AlreadyExists,
+        Self::DiskFull,
+        Self::NetworkTimeout,
+        Self::HttpUnauthorized,
+        Self::HttpForbidden,
+        Self::HttpRateLimit,
+        Self::ResourceChanged,
+        Self::RangeUnsupported,
+        Self::ChecksumMismatch,
+        Self::LengthMismatch,
+        Self::UrlNotAllowed,
+        Self::TaskNotFound,
+        Self::InvalidTransition,
+        Self::DataDirectoryInUse,
+        Self::NetworkConnection,
+        Self::NetworkInterrupted,
+        Self::TlsError,
+        Self::HttpNotFound,
+        Self::HttpClientError,
+        Self::HttpServerError,
+        Self::HttpRedirect,
+        Self::StoragePermission,
+        Self::StorageNotFound,
+        Self::StorageError,
+        Self::Internal,
+    ];
+
     pub fn as_str(self) -> &'static str {
         match self {
             Self::InvalidUrl => "INVALID_URL",
@@ -36,8 +80,21 @@ impl ErrorCode {
             Self::ResourceChanged => "RESOURCE_CHANGED",
             Self::RangeUnsupported => "RANGE_UNSUPPORTED",
             Self::ChecksumMismatch => "CHECKSUM_MISMATCH",
+            Self::LengthMismatch => "LENGTH_MISMATCH",
+            Self::UrlNotAllowed => "URL_NOT_ALLOWED",
             Self::TaskNotFound => "TASK_NOT_FOUND",
             Self::InvalidTransition => "INVALID_TRANSITION",
+            Self::DataDirectoryInUse => "DATA_DIRECTORY_IN_USE",
+            Self::NetworkConnection => "NETWORK_CONNECTION",
+            Self::NetworkInterrupted => "NETWORK_INTERRUPTED",
+            Self::TlsError => "TLS_ERROR",
+            Self::HttpNotFound => "HTTP_NOT_FOUND",
+            Self::HttpClientError => "HTTP_CLIENT_ERROR",
+            Self::HttpServerError => "HTTP_SERVER_ERROR",
+            Self::HttpRedirect => "HTTP_REDIRECT",
+            Self::StoragePermission => "STORAGE_PERMISSION",
+            Self::StorageNotFound => "STORAGE_NOT_FOUND",
+            Self::StorageError => "STORAGE_ERROR",
             Self::Internal => "INTERNAL",
         }
     }
@@ -46,9 +103,12 @@ impl ErrorCode {
         matches!(
             self,
             Self::NetworkTimeout
+                | Self::NetworkConnection
+                | Self::NetworkInterrupted
+                | Self::HttpServerError
+                | Self::StorageError
                 | Self::HttpRateLimit
                 | Self::DiskFull
-                | Self::ResourceChanged
                 | Self::Internal
         )
     }

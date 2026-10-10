@@ -31,6 +31,10 @@ fn serialized_ipc_matches_the_shared_frontend_contract() {
         last_modified: None,
         request_id: Some("private-request-id".into()),
         retry_count: 3,
+        expected_sha256: None,
+        actual_sha256: None,
+        checksum_result: None,
+        finalization: None,
     };
     let payload = json!({
         "task": task,
@@ -42,6 +46,7 @@ fn serialized_ipc_matches_the_shared_frontend_contract() {
         "settings": Settings::default(),
         "queue": Queue { id: "default".into(), name: "Default".into(), task_count: 2 },
         "remove": RemoveDownloadResult { removed: true },
+        "errorCodes": ErrorCode::ALL,
         "error": AppError::new(ErrorCode::DiskFull, "Fixture storage error"),
     });
     let expected: serde_json::Value =

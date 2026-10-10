@@ -10,6 +10,9 @@ import {
 const sampleTask = {
   id: '01HXYZ',
   url: 'https://example.com/file.bin',
+  expectedSha256: null,
+  actualSha256: null,
+  checksumResult: null,
   fileName: 'file.bin',
   destinationId: 'default',
   status: 'queued' as const,

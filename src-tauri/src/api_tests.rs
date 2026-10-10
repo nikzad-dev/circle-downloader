@@ -3,6 +3,7 @@ use crate::domain::{
     CreateDownloadRequest, DownloadStatus, ErrorCode, RemoveDownloadRequest, UpdateSettingsRequest,
 };
 use crate::infrastructure::db::Database;
+use crate::infrastructure::ownership::DataDirectoryLease;
 use crate::ipc::progress::ProgressHub;
 use sha2::{Digest, Sha256};
 use std::time::Duration;
@@ -14,7 +15,13 @@ fn manager() -> (tempfile::TempDir, DownloadManager) {
     let dir = tempdir().unwrap();
     let db = Database::open(dir.path().join("test.db")).unwrap();
     let downloads = dir.path().join("downloads");
-    let mgr = DownloadManager::new(db, downloads, ProgressHub::default()).unwrap();
+    let mgr = DownloadManager::new(
+        db,
+        downloads,
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
     (dir, mgr)
 }
 
@@ -88,6 +95,7 @@ async fn create_rejects_remote_http() {
             suggested_name: None,
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::UnsupportedScheme);
@@ -103,6 +111,7 @@ async fn create_rejects_invalid_url() {
             suggested_name: None,
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap_err();
     assert_eq!(err.code, ErrorCode::InvalidUrl);
@@ -124,6 +133,7 @@ async fn list_reflects_created_tasks() {
         suggested_name: Some("a.bin".into()),
         start_now: false,
         request_id: None,
+        expected_sha256: None,
     })
     .unwrap();
     assert_eq!(mgr.list().unwrap().len(), 1);
@@ -139,6 +149,7 @@ async fn create_idempotent_with_request_id() {
             suggested_name: Some("a.bin".into()),
             start_now: false,
             request_id: Some("idem-1".into()),
+            expected_sha256: None,
         })
         .unwrap();
     let b = mgr
@@ -148,6 +159,7 @@ async fn create_idempotent_with_request_id() {
             suggested_name: Some("a.bin".into()),
             start_now: false,
             request_id: Some("idem-1".into()),
+            expected_sha256: None,
         })
         .unwrap();
     assert_eq!(a.id, b.id);
@@ -168,6 +180,7 @@ async fn downloads_fixture_byte_identical() {
             suggested_name: Some("file.bin".into()),
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
 
@@ -197,6 +210,7 @@ async fn cancel_mid_download_is_not_completed() {
             suggested_name: Some("big.bin".into()),
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
 
@@ -216,6 +230,7 @@ async fn cancel_completed_is_invalid_transition() {
             suggested_name: Some("x.bin".into()),
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     wait_for_status(
@@ -239,6 +254,7 @@ async fn pause_resume_retry_remove() {
             suggested_name: Some("a.bin".into()),
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
 
@@ -258,6 +274,7 @@ async fn pause_resume_retry_remove() {
             suggested_name: Some("nope.bin".into()),
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     wait_for_status(
@@ -316,6 +333,7 @@ async fn range_200_does_not_corrupt_partial() {
             suggested_name: Some("file.bin".into()),
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
 
@@ -351,7 +369,13 @@ async fn reconcile_marks_active_as_failed() {
     let db_path = dir.path().join("test.db");
     let db = Database::open(&db_path).unwrap();
     let downloads = dir.path().join("downloads");
-    let mgr = DownloadManager::new(db, downloads.clone(), ProgressHub::default()).unwrap();
+    let mgr = DownloadManager::new(
+        db,
+        downloads.clone(),
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
     let task = mgr
         .create(CreateDownloadRequest {
             url: "https://example.com/a.bin".into(),
@@ -359,6 +383,7 @@ async fn reconcile_marks_active_as_failed() {
             suggested_name: Some("a.bin".into()),
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     let mut active = mgr.get(&task.id).unwrap();
@@ -368,10 +393,12 @@ async fn reconcile_marks_active_as_failed() {
         .upsert_download(&active)
         .unwrap();
 
+    drop(mgr);
     let mgr2 = DownloadManager::new(
         Database::open(&db_path).unwrap(),
         downloads,
         ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
     )
     .unwrap();
     mgr2.reconcile_on_startup().unwrap();
@@ -416,6 +443,7 @@ async fn deferred_download_is_paused_and_resumable() {
             suggested_name: None,
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     assert_eq!(task.status, DownloadStatus::Paused);
@@ -446,6 +474,7 @@ async fn auto_start_off_saves_paused_even_when_requested() {
             suggested_name: None,
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     assert_eq!(task.status, DownloadStatus::Paused);
@@ -461,6 +490,7 @@ fn native_sync_command_can_start_worker_without_tokio_context() {
             suggested_name: None,
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     let start = std::time::Instant::now();
@@ -540,6 +570,7 @@ async fn rapid_pause_resume_drains_each_writer_and_preserves_identity() {
             suggested_name: None,
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     for _ in 0..5 {
@@ -587,6 +618,7 @@ async fn remove_during_transfer_cannot_recreate_task_or_partial() {
             suggested_name: None,
             start_now: true,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     wait_for_status(
@@ -620,6 +652,7 @@ async fn finalization_never_replaces_a_file_that_appears_during_transfer() {
             suggested_name: Some("external.bin".into()),
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     let final_path = task.final_path.as_ref().unwrap();
@@ -656,6 +689,7 @@ fn simultaneous_creates_reserve_names_and_request_ids() {
                     suggested_name: Some("file.bin".into()),
                     start_now: false,
                     request_id: Some(format!("request-{}", index / 2)),
+                    expected_sha256: None,
                 })
                 .unwrap()
             })
@@ -695,6 +729,7 @@ async fn invalid_or_duplicate_start_actions_do_not_cancel_the_valid_writer() {
             suggested_name: None,
             start_now: false,
             request_id: None,
+            expected_sha256: None,
         })
         .unwrap();
     let (first, second) = tokio::join!(mgr.resume(&task.id), mgr.resume(&task.id));
@@ -731,4 +766,318 @@ async fn invalid_or_duplicate_start_actions_do_not_cancel_the_valid_writer() {
         std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
         bytes
     );
+}
+
+#[tokio::test]
+async fn supplied_sha256_is_compared_and_retained_without_publishing_mismatches() {
+    let bytes = b"checksum-content".to_vec();
+    let actual = sha256_hex(&bytes);
+    let base = spawn_fixture_server(move |_| (200, bytes.clone())).await;
+    for expected in [None, Some(actual.to_uppercase()), Some("0".repeat(64))] {
+        let (_dir, mgr) = manager();
+        let task = mgr
+            .create(CreateDownloadRequest {
+                url: format!("{base}/checksum.bin?signature=private"),
+                destination_id: None,
+                suggested_name: None,
+                start_now: true,
+                request_id: None,
+                expected_sha256: expected.clone(),
+            })
+            .unwrap();
+        wait_for_status(
+            &mgr,
+            &task.id,
+            &[DownloadStatus::Completed, DownloadStatus::Failed],
+            Duration::from_secs(5),
+        )
+        .await;
+        let done = mgr.get(&task.id).unwrap();
+        assert_eq!(done.actual_sha256.as_deref(), Some(actual.as_str()));
+        assert!(!serde_json::to_string(&done).unwrap().contains("private"));
+        assert!(
+            done.url.contains("signature=private"),
+            "signed URL stays private in SQLite for resumption"
+        );
+        match expected {
+            Some(value) if value == "0".repeat(64) => {
+                assert_eq!(done.status, DownloadStatus::Failed);
+                assert_eq!(done.checksum_result.as_deref(), Some("mismatch"));
+                assert_eq!(done.error.unwrap().code, ErrorCode::ChecksumMismatch);
+                assert!(!std::path::Path::new(done.final_path.as_ref().unwrap()).exists());
+                assert!(std::path::Path::new(done.temp_path.as_ref().unwrap()).exists());
+            }
+            value => {
+                assert_eq!(done.status, DownloadStatus::Completed);
+                assert_eq!(
+                    done.checksum_result.as_deref(),
+                    Some(if value.is_some() {
+                        "matched"
+                    } else {
+                        "computed"
+                    })
+                );
+                assert_eq!(done.expected_sha256, value.map(|s| s.to_lowercase()));
+                assert!(done.finalization.is_none());
+            }
+        }
+    }
+}
+
+#[test]
+fn rejects_invalid_checksum_and_unapproved_destination_before_creating_tasks() {
+    let (_dir, mgr) = manager();
+    for (checksum, destination) in [
+        (Some("bad".into()), None),
+        (None, Some("unapproved".into())),
+    ] {
+        assert!(
+            mgr.create(CreateDownloadRequest {
+                url: "https://example.com/file".into(),
+                destination_id: destination,
+                suggested_name: None,
+                start_now: false,
+                request_id: None,
+                expected_sha256: checksum
+            })
+            .is_err()
+        );
+    }
+    assert!(mgr.list().unwrap().is_empty());
+}
+
+#[test]
+fn durable_finalization_recovers_every_publication_boundary() {
+    for (checkpoint, partial, final_file) in [
+        ("ready", true, false),
+        ("ready", true, true),
+        ("ready", false, true),
+        ("cleanup", true, true),
+        ("cleanup", false, true),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::build_state(dir.path().into()).unwrap();
+        let mut task = state
+            .manager
+            .create(CreateDownloadRequest {
+                url: "https://example.com/recovery.bin".into(),
+                destination_id: None,
+                suggested_name: None,
+                start_now: false,
+                request_id: None,
+                expected_sha256: Some(sha256_hex(b"durable")),
+            })
+            .unwrap();
+        let temp = task.temp_path.clone().unwrap();
+        let final_path = task.final_path.clone().unwrap();
+        if partial {
+            std::fs::write(&temp, b"durable").unwrap();
+        }
+        if final_file {
+            std::fs::write(&final_path, b"durable").unwrap();
+        }
+        task.status = if checkpoint == "cleanup" {
+            DownloadStatus::Completed
+        } else {
+            DownloadStatus::Verifying
+        };
+        task.actual_sha256 = Some(sha256_hex(b"durable"));
+        task.checksum_result = Some("matched".into());
+        task.finalization = Some(checkpoint.into());
+        task.downloaded_bytes = 7;
+        task.total_bytes = Some(7);
+        Database::open(dir.path().join("circle-downloader.db"))
+            .unwrap()
+            .upsert_download(&task)
+            .unwrap();
+        drop(state);
+        let recovered = crate::build_state(dir.path().into()).unwrap();
+        let done = recovered.manager.get(&task.id).unwrap();
+        assert_eq!(
+            done.status,
+            DownloadStatus::Completed,
+            "{checkpoint} {partial} {final_file}"
+        );
+        assert_eq!(std::fs::read(&final_path).unwrap(), b"durable");
+        assert!(!std::path::Path::new(&temp).exists());
+        assert!(done.temp_path.is_none());
+        assert!(done.finalization.is_none());
+        assert_eq!(done.actual_sha256, task.actual_sha256);
+        drop(recovered);
+        assert_eq!(
+            crate::build_state(dir.path().into())
+                .unwrap()
+                .manager
+                .get(&task.id)
+                .unwrap()
+                .status,
+            DownloadStatus::Completed,
+            "recovery is idempotent"
+        );
+    }
+}
+
+#[test]
+fn recovery_preserves_conflicts_and_detects_missing_or_changed_files() {
+    for scenario in [
+        "conflict",
+        "changed-partial",
+        "missing-both",
+        "missing-completed",
+        "changed-completed",
+        "orphan-final",
+        "missing-partial",
+        "paused-length",
+        "unknown-checkpoint",
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let state = crate::build_state(dir.path().into()).unwrap();
+        let mut task = state
+            .manager
+            .create(CreateDownloadRequest {
+                url: "https://example.com/recovery.bin".into(),
+                destination_id: None,
+                suggested_name: None,
+                start_now: false,
+                request_id: None,
+                expected_sha256: None,
+            })
+            .unwrap();
+        let temp = task.temp_path.clone().unwrap();
+        let final_path = task.final_path.clone().unwrap();
+        task.actual_sha256 = Some(sha256_hex(b"durable"));
+        task.checksum_result = Some("computed".into());
+        task.downloaded_bytes = 7;
+        match scenario {
+            "conflict" => {
+                task.finalization = Some("ready".into());
+                std::fs::write(&temp, b"durable").unwrap();
+                std::fs::write(&final_path, b"external").unwrap();
+            }
+            "changed-partial" => {
+                task.finalization = Some("ready".into());
+                std::fs::write(&temp, b"changed").unwrap();
+            }
+            "missing-both" => task.finalization = Some("ready".into()),
+            "unknown-checkpoint" => task.finalization = Some("future".into()),
+            "missing-completed" => {
+                task.status = DownloadStatus::Completed;
+                task.temp_path = None;
+            }
+            "changed-completed" => {
+                task.status = DownloadStatus::Completed;
+                task.temp_path = None;
+                std::fs::write(&final_path, b"changed").unwrap();
+            }
+            "orphan-final" => {
+                std::fs::write(&final_path, b"external").unwrap();
+            }
+            "paused-length" => {
+                std::fs::write(&temp, b"part").unwrap();
+                task.total_bytes = Some(100);
+            }
+            _ => {}
+        }
+        Database::open(dir.path().join("circle-downloader.db"))
+            .unwrap()
+            .upsert_download(&task)
+            .unwrap();
+        drop(state);
+        let recovered = crate::build_state(dir.path().into()).unwrap();
+        let done = recovered.manager.get(&task.id).unwrap();
+        if scenario == "paused-length" {
+            assert_eq!(done.status, DownloadStatus::Paused);
+            assert_eq!(done.downloaded_bytes, 4);
+        } else {
+            assert_eq!(done.status, DownloadStatus::Failed, "{scenario}");
+            assert!(done.error.is_some());
+        }
+        if scenario == "conflict" {
+            assert_eq!(std::fs::read(&temp).unwrap(), b"durable");
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"external");
+        }
+        if scenario == "orphan-final" {
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"external");
+        }
+        if scenario == "missing-partial" {
+            assert_eq!(done.downloaded_bytes, 0);
+            assert!(done.etag.is_none());
+        }
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn managed_download_rejects_partial_symlinks_without_touching_target() {
+    let base = spawn_fixture_server(|_| (200, b"payload".to_vec())).await;
+    let (dir, mgr) = manager();
+    let victim = dir.path().join("victim");
+    std::fs::write(&victim, b"private").unwrap();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/unsafe.bin"),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    std::os::unix::fs::symlink(&victim, task.temp_path.unwrap()).unwrap();
+    assert_eq!(
+        mgr.resume(&task.id).await.unwrap_err().code,
+        ErrorCode::PathNotAllowed
+    );
+    assert_eq!(std::fs::read(&victim).unwrap(), b"private");
+}
+
+#[test]
+fn canceled_publication_checkpoint_does_not_publish_on_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let state = crate::build_state(dir.path().into()).unwrap();
+    let mut task = state
+        .manager
+        .create(CreateDownloadRequest {
+            url: "https://example.com/canceled".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    std::fs::write(task.temp_path.as_ref().unwrap(), b"ready").unwrap();
+    task.status = DownloadStatus::Canceled;
+    task.finalization = Some("ready".into());
+    task.actual_sha256 = Some(sha256_hex(b"ready"));
+    task.checksum_result = Some("computed".into());
+    Database::open(dir.path().join("circle-downloader.db"))
+        .unwrap()
+        .upsert_download(&task)
+        .unwrap();
+    drop(state);
+    let recovered = crate::build_state(dir.path().into()).unwrap();
+    let done = recovered.manager.get(&task.id).unwrap();
+    assert_eq!(done.status, DownloadStatus::Canceled);
+    assert!(done.finalization.is_none());
+    assert!(!std::path::Path::new(done.final_path.as_ref().unwrap()).exists());
+}
+
+#[test]
+fn ipc_serialization_redacts_legacy_credentials_and_signed_queries() {
+    let (_dir, mgr) = manager();
+    let mut task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/file?signature=private".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    task.url = "https://legacy-user:private-password@example.com/file?signature=private-query#private-fragment".into();
+    let serialized = serde_json::to_value(task).unwrap();
+    assert_eq!(serialized["url"], "https://example.com/file");
+    assert!(!serialized.to_string().contains("private"));
 }

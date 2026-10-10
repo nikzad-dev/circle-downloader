@@ -15,6 +15,7 @@ pub struct TaskError {
 #[serde(rename_all = "camelCase")]
 pub struct DownloadTask {
     pub id: String,
+    #[serde(serialize_with = "serialize_redacted_url")]
     pub url: String,
     pub file_name: String,
     pub destination_id: String,
@@ -24,6 +25,12 @@ pub struct DownloadTask {
     pub speed_bytes_per_second: u64,
     pub revision: u64,
     pub error: Option<TaskError>,
+    pub expected_sha256: Option<String>,
+    pub actual_sha256: Option<String>,
+    /// computed, matched, or mismatch; length validation is independent.
+    pub checksum_result: Option<String>,
+    #[serde(skip)]
+    pub finalization: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     #[serde(skip)]
@@ -56,6 +63,7 @@ pub struct CreateDownloadRequest {
     #[serde(default = "default_start_now")]
     pub start_now: bool,
     pub request_id: Option<String>,
+    pub expected_sha256: Option<String>,
 }
 
 fn default_start_now() -> bool {
@@ -124,4 +132,31 @@ fn default_delete_partial() -> bool {
 #[serde(rename_all = "camelCase")]
 pub struct RemoveDownloadResult {
     pub removed: bool,
+}
+
+fn serialize_redacted_url<S: serde::Serializer>(
+    raw: &str,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    let mut url = url::Url::parse(raw).map_err(serde::ser::Error::custom)?;
+    let _ = url.set_username("");
+    let _ = url.set_password(None);
+    url.set_query(None);
+    url.set_fragment(None);
+    serializer.serialize_str(url.as_str())
+}
+
+pub fn normalize_sha256(value: Option<String>) -> Result<Option<String>, super::AppError> {
+    value
+        .map(|value| {
+            let value = value.trim();
+            if value.len() != 64 || !value.bytes().all(|b| b.is_ascii_hexdigit()) {
+                return Err(super::AppError::new(
+                    ErrorCode::ChecksumMismatch,
+                    "Expected SHA-256 must contain exactly 64 hexadecimal characters.",
+                ));
+            }
+            Ok(value.to_ascii_lowercase())
+        })
+        .transpose()
 }

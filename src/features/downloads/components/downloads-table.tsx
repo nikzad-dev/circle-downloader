@@ -17,6 +17,12 @@ const columns = [
       <div className="min-w-0">
         <p title={row.original.fileName} className="max-w-44 truncate font-medium lg:max-w-80">{row.original.fileName}</p>
         <Badge variant={row.original.status === 'failed' ? 'destructive' : 'secondary'} className="mt-2">{statusLabels[row.original.status]}</Badge>
+        {row.original.actualSha256 !== null && (
+          <div className="mt-2 max-w-64 text-xs text-muted-foreground">
+            <p>{row.original.checksumResult === 'matched' ? 'SHA-256 verified' : row.original.checksumResult === 'mismatch' ? 'SHA-256 mismatch' : 'SHA-256 calculated · no expected checksum'}</p>
+            <code className="block break-all select-all">{row.original.actualSha256}</code>
+          </div>
+        )}
         {row.original.error && <p className="mt-2 max-w-64 text-xs leading-relaxed whitespace-normal text-destructive">{downloadErrorMessage(row.original.error)}</p>}
       </div>
     </div>

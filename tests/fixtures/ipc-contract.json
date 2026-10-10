@@ -15,7 +15,10 @@
       "retryable": true
     },
     "createdAt": "2026-10-10T00:00:00Z",
-    "updatedAt": "2026-10-10T00:00:00Z"
+    "updatedAt": "2026-10-10T00:00:00Z",
+    "expectedSha256": null,
+    "actualSha256": null,
+    "checksumResult": null
   },
   "progress": {
     "taskId": "contract-task",
@@ -43,5 +46,35 @@
     "code": "DISK_FULL",
     "message": "Fixture storage error",
     "retryable": true
-  }
+  },
+  "errorCodes": [
+    "INVALID_URL",
+    "UNSUPPORTED_SCHEME",
+    "PATH_NOT_ALLOWED",
+    "ALREADY_EXISTS",
+    "DISK_FULL",
+    "NETWORK_TIMEOUT",
+    "HTTP_UNAUTHORIZED",
+    "HTTP_FORBIDDEN",
+    "HTTP_RATE_LIMIT",
+    "RESOURCE_CHANGED",
+    "RANGE_UNSUPPORTED",
+    "CHECKSUM_MISMATCH",
+    "LENGTH_MISMATCH",
+    "URL_NOT_ALLOWED",
+    "TASK_NOT_FOUND",
+    "INVALID_TRANSITION",
+    "DATA_DIRECTORY_IN_USE",
+    "NETWORK_CONNECTION",
+    "NETWORK_INTERRUPTED",
+    "TLS_ERROR",
+    "HTTP_NOT_FOUND",
+    "HTTP_CLIENT_ERROR",
+    "HTTP_SERVER_ERROR",
+    "HTTP_REDIRECT",
+    "STORAGE_PERMISSION",
+    "STORAGE_NOT_FOUND",
+    "STORAGE_ERROR",
+    "INTERNAL"
+  ]
 }

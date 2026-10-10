@@ -32,7 +32,7 @@ function AddDownloadForm({ onSuccess, triggerRef, onBusyChange }: { onSuccess: (
   const client = useQueryClient()
   const operationRef = useRef<{ input: string, id: string } | null>(null)
   const submittingRef = useRef(false)
-  const form = useForm<CreateFormValues>({ resolver: zodResolver(createFormSchema), defaultValues: { url: '', suggestedName: '', startNow: true } })
+  const form = useForm<CreateFormValues>({ resolver: zodResolver(createFormSchema), defaultValues: { url: '', suggestedName: '', expectedSha256: '', startNow: true } })
   const mutation = useMutation(orpc.downloads.create.mutationOptions())
   const submit = form.handleSubmit(async (values) => {
     if (submittingRef.current)
@@ -40,7 +40,7 @@ function AddDownloadForm({ onSuccess, triggerRef, onBusyChange }: { onSuccess: (
     submittingRef.current = true
     onBusyChange(true)
     form.clearErrors('root')
-    const input = { url: values.url, suggestedName: values.suggestedName || undefined, startNow: values.startNow, destinationId: 'default' }
+    const input = { url: values.url, suggestedName: values.suggestedName || undefined, startNow: values.startNow, destinationId: 'default', expectedSha256: values.expectedSha256?.trim() === '' ? undefined : values.expectedSha256 }
     const signature = JSON.stringify(input)
     if (operationRef.current?.input !== signature)
       operationRef.current = { input: signature, id: crypto.randomUUID() }
@@ -72,7 +72,7 @@ function AddDownloadForm({ onSuccess, triggerRef, onBusyChange }: { onSuccess: (
         <Field data-invalid={!!form.formState.errors.url}>
           <FieldLabel htmlFor="download-url">Download URL</FieldLabel>
           <Input id="download-url" placeholder="https://example.com/file.zip" {...form.register('url')} aria-invalid={!!form.formState.errors.url} aria-describedby="download-url-help download-url-error" autoComplete="off" disabled={mutation.isPending} />
-          <FieldDescription id="download-url-help">HTTPS links, or HTTP for localhost.</FieldDescription>
+          <FieldDescription id="download-url-help">Use HTTPS. Local HTTP fixture links work only in debug builds.</FieldDescription>
           <FieldError id="download-url-error">{form.formState.errors.url?.message}</FieldError>
         </Field>
         <Field>
@@ -81,6 +81,15 @@ function AddDownloadForm({ onSuccess, triggerRef, onBusyChange }: { onSuccess: (
             <span className="text-muted-foreground">(optional)</span>
           </FieldLabel>
           <Input id="download-name" placeholder="Keep the name from the link" {...form.register('suggestedName')} disabled={mutation.isPending} />
+        </Field>
+        <Field data-invalid={!!form.formState.errors.expectedSha256}>
+          <FieldLabel htmlFor="download-checksum">
+            SHA-256
+            <span className="text-muted-foreground">(optional)</span>
+          </FieldLabel>
+          <Input id="download-checksum" placeholder="64 hexadecimal characters" {...form.register('expectedSha256')} aria-invalid={!!form.formState.errors.expectedSha256} aria-describedby="download-checksum-help download-checksum-error" autoComplete="off" spellCheck={false} disabled={mutation.isPending} />
+          <FieldDescription id="download-checksum-help">Paste the checksum from a trusted source to verify the downloaded file.</FieldDescription>
+          <FieldError id="download-checksum-error">{form.formState.errors.expectedSha256?.message}</FieldError>
         </Field>
         <Controller
           control={form.control}

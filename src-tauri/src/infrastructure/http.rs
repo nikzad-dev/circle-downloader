@@ -1,3 +1,4 @@
+use super::errors::{http_status_error, map_io_err, map_reqwest_err, network_deadline};
 use crate::domain::{AppError, ErrorCode};
 use futures_util::StreamExt;
 use reqwest::{Client, StatusCode, header};
@@ -13,6 +14,7 @@ pub struct DownloadResult {
     pub bytes_written: u64,
     pub total_bytes: Option<u64>,
     pub sha256_hex: String,
+    pub verified_file: std::sync::Arc<super::files::VerifiedFile>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -33,6 +35,7 @@ pub struct ProgressUpdate {
     pub transferred_bytes: u64,
     pub total_bytes: Option<u64>,
     pub bytes_per_second: u64,
+    pub verifying: bool,
 }
 
 pub struct CancelToken {
@@ -57,10 +60,6 @@ pub fn cancel_pair() -> (watch::Sender<bool>, CancelToken) {
 
 fn canceled() -> AppError {
     AppError::new(ErrorCode::InvalidTransition, "Download canceled")
-}
-
-fn deadline() -> AppError {
-    AppError::new(ErrorCode::NetworkTimeout, "The server stopped responding")
 }
 
 fn strong_etag(value: &str) -> bool {
@@ -156,15 +155,94 @@ fn validate_content_range(value: &str, offset: u64, length: Option<u64>) -> Resu
     Ok(total)
 }
 
+#[cfg(test)]
 pub async fn download_to_file(
     client: &Client,
     url: &str,
     dest: &Path,
     resume: ResumeMetadata,
     cancel: &CancelToken,
+    on_metadata: impl FnMut(&ResponseMetadata) -> Result<(), AppError>,
+    on_progress: impl FnMut(ProgressUpdate),
+) -> Result<DownloadResult, AppError> {
+    transfer(
+        TransferRequest {
+            client,
+            url,
+            dest,
+            files: None,
+            resume,
+            cancel,
+            timeouts: TransferTimeouts::default(),
+        },
+        on_metadata,
+        on_progress,
+    )
+    .await
+}
+
+pub async fn download_managed(
+    context: (&Client, &super::files::ManagedFiles),
+    url: &str,
+    dest: &Path,
+    resume: ResumeMetadata,
+    cancel: &CancelToken,
+    on_metadata: impl FnMut(&ResponseMetadata) -> Result<(), AppError>,
+    on_progress: impl FnMut(ProgressUpdate),
+) -> Result<DownloadResult, AppError> {
+    transfer(
+        TransferRequest {
+            client: context.0,
+            files: Some(context.1),
+            url,
+            dest,
+            resume,
+            cancel,
+            timeouts: TransferTimeouts::default(),
+        },
+        on_metadata,
+        on_progress,
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct TransferTimeouts {
+    headers: Duration,
+    body: Duration,
+}
+impl Default for TransferTimeouts {
+    fn default() -> Self {
+        Self {
+            headers: Duration::from_secs(30),
+            body: Duration::from_secs(30),
+        }
+    }
+}
+pub(crate) struct TransferRequest<'a> {
+    client: &'a Client,
+    url: &'a str,
+    dest: &'a Path,
+    files: Option<&'a super::files::ManagedFiles>,
+    resume: ResumeMetadata,
+    cancel: &'a CancelToken,
+    timeouts: TransferTimeouts,
+}
+async fn transfer(
+    request: TransferRequest<'_>,
     mut on_metadata: impl FnMut(&ResponseMetadata) -> Result<(), AppError>,
     mut on_progress: impl FnMut(ProgressUpdate),
 ) -> Result<DownloadResult, AppError> {
+    let TransferRequest {
+        client,
+        url,
+        dest,
+        files,
+        resume,
+        cancel,
+        timeouts,
+    } = request;
+    crate::domain::url_policy::validate_download_url(url)?;
     if cancel.is_cancelled() {
         return Err(canceled());
     }
@@ -187,19 +265,9 @@ pub async fn download_to_file(
     let response = tokio::select! {
         biased;
         _ = cancel.cancelled() => return Err(canceled()),
-        result = tokio::time::timeout(Duration::from_secs(30), request.send()) => result.map_err(|_| deadline())?.map_err(map_reqwest_err)?,
+        result = tokio::time::timeout(timeouts.headers, request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
     };
     match response.status() {
-        StatusCode::UNAUTHORIZED => {
-            return Err(AppError::new(ErrorCode::HttpUnauthorized, "HTTP 401"));
-        }
-        StatusCode::FORBIDDEN => return Err(AppError::new(ErrorCode::HttpForbidden, "HTTP 403")),
-        StatusCode::TOO_MANY_REQUESTS => {
-            return Err(AppError::new(ErrorCode::HttpRateLimit, "HTTP 429"));
-        }
-        StatusCode::RANGE_NOT_SATISFIABLE => {
-            return Err(AppError::new(ErrorCode::RangeUnsupported, "HTTP 416"));
-        }
         StatusCode::OK if resume.offset > 0 => {
             return Err(AppError::new(
                 ErrorCode::ResourceChanged,
@@ -213,37 +281,27 @@ pub async fn download_to_file(
             ));
         }
         StatusCode::OK | StatusCode::PARTIAL_CONTENT => {}
-        status => {
-            return Err(AppError::new(
-                ErrorCode::Internal,
-                format!("Server returned HTTP {}", status.as_u16()),
-            ));
-        }
+        status => return Err(http_status_error(status)),
     }
+
     let metadata = validate_metadata(&response, &resume)?;
     on_metadata(&metadata)?;
     if cancel.is_cancelled() {
         return Err(canceled());
     }
-    let mut file = if resume.offset > 0 {
-        let file = tokio::fs::OpenOptions::new()
-            .append(true)
-            .open(dest)
-            .await
-            .map_err(map_io_err)?;
-        if file.metadata().await.map_err(map_io_err)?.len() != resume.offset {
-            return Err(AppError::new(
-                ErrorCode::ResourceChanged,
-                "The partial file changed while opening it",
-            ));
+    let owned_files;
+    let files = match files {
+        Some(files) => files,
+        None => {
+            owned_files = super::files::ManagedFiles::new(dest.parent().ok_or_else(|| {
+                AppError::new(ErrorCode::PathNotAllowed, "Missing download directory")
+            })?)?;
+            &owned_files
         }
-        file
-    } else {
-        File::create(dest).await.map_err(map_io_err)?
     };
+    let mut file = File::from_std(files.partial(Path::new(files.name(dest)?), resume.offset)?);
     let mut stream = response.bytes_stream();
     let mut written = resume.offset;
-    let mut hasher = Sha256::new();
     let started = Instant::now();
     let mut last_tick = started;
     let transfer = async {
@@ -251,19 +309,19 @@ pub async fn download_to_file(
         let next = tokio::select! {
             biased;
             _ = cancel.cancelled() => return Err(canceled()),
-            result = tokio::time::timeout(Duration::from_secs(30), stream.next()) => result.map_err(|_| deadline())?,
+            result = tokio::time::timeout(timeouts.body, stream.next()) => result.map_err(|_| network_deadline("The server stopped sending file data. Check your connection and retry."))?,
         };
         let Some(chunk) = next else { break };
         let chunk = chunk.map_err(map_reqwest_err)?;
         let next_written = written
             .checked_add(chunk.len() as u64)
-            .ok_or_else(|| AppError::new(ErrorCode::ChecksumMismatch, "File size overflow"))?;
+            .ok_or_else(|| AppError::new(ErrorCode::LengthMismatch, "File size overflow"))?;
         if metadata
             .total_bytes
             .is_some_and(|total| next_written > total)
         {
             return Err(AppError::new(
-                ErrorCode::ChecksumMismatch,
+                ErrorCode::LengthMismatch,
                 "Response exceeded the declared file size",
             ));
         }
@@ -272,10 +330,10 @@ pub async fn download_to_file(
             _ = cancel.cancelled() => return Err(canceled()),
             result = file.write_all(&chunk) => result.map_err(map_io_err)?,
         }
-        hasher.update(&chunk);
         written = next_written;
         if last_tick.elapsed().as_millis() >= 100 {
             on_progress(ProgressUpdate {
+                verifying: false,
                 transferred_bytes: written,
                 total_bytes: metadata.total_bytes,
                 bytes_per_second: ((written - resume.offset) as f64
@@ -287,7 +345,7 @@ pub async fn download_to_file(
     }
     if metadata.total_bytes.is_some_and(|total| written != total) {
         return Err(AppError::new(
-            ErrorCode::ChecksumMismatch,
+            ErrorCode::LengthMismatch,
             "The response ended before all expected bytes arrived",
         ));
     }
@@ -295,19 +353,27 @@ pub async fn download_to_file(
     }.await;
     // Drain pending Tokio filesystem work even on cancellation or network failure.
     file.flush().await.map_err(map_io_err)?;
-    transfer?;
     file.sync_all().await.map_err(map_io_err)?;
-    drop(file);
-    let sha256_hex = if resume.offset == 0 {
-        hex::encode(hasher.finalize())
-    } else {
-        tokio::select! {
-            biased;
-            _ = cancel.cancelled() => return Err(canceled()),
-            result = hash_file(dest) => result?,
-        }
-    };
+    transfer?;
+    use tokio::io::AsyncSeekExt;
+    file.seek(std::io::SeekFrom::Start(0))
+        .await
+        .map_err(map_io_err)?;
     on_progress(ProgressUpdate {
+        verifying: true,
+        transferred_bytes: written,
+        total_bytes: metadata.total_bytes,
+        bytes_per_second: 0,
+    });
+    let metadata_before_hash = file.metadata().await.map_err(map_io_err)?;
+    let sha256_hex = hash_reader(&mut file, cancel).await?;
+    let verified_file = std::sync::Arc::new(super::files::VerifiedFile {
+        file: file.into_std().await,
+        metadata: metadata_before_hash,
+    });
+    verified_file.unchanged()?;
+    on_progress(ProgressUpdate {
+        verifying: true,
         transferred_bytes: written,
         total_bytes: metadata.total_bytes,
         bytes_per_second: 0,
@@ -316,48 +382,40 @@ pub async fn download_to_file(
         bytes_written: written,
         total_bytes: metadata.total_bytes,
         sha256_hex,
+        verified_file,
     })
 }
 
-pub async fn hash_file(path: &Path) -> Result<String, AppError> {
-    let mut file = File::open(path).await.map_err(map_io_err)?;
+#[cfg(test)]
+pub async fn hash_file(path: &Path, cancel: &CancelToken) -> Result<String, AppError> {
+    let file = tokio::select! {
+        biased;
+        _ = cancel.cancelled() => return Err(canceled()),
+        result = File::open(path) => result.map_err(map_io_err)?,
+    };
+    hash_reader(file, cancel).await
+}
+
+async fn hash_reader(
+    mut reader: impl tokio::io::AsyncRead + Unpin,
+    cancel: &CancelToken,
+) -> Result<String, AppError> {
     let mut buffer = [0; 64 * 1024];
     let mut hasher = Sha256::new();
     loop {
-        let size = file.read(&mut buffer).await.map_err(map_io_err)?;
+        let size = tokio::select! {
+            biased;
+            _ = cancel.cancelled() => return Err(canceled()),
+            result = reader.read(&mut buffer) => result.map_err(map_io_err)?,
+        };
         if size == 0 {
             break;
         }
         hasher.update(&buffer[..size]);
+        // Always yield even if the reader is immediately ready, so cancellation cannot starve.
+        tokio::task::yield_now().await;
     }
     Ok(hex::encode(hasher.finalize()))
-}
-
-fn map_reqwest_err(err: reqwest::Error) -> AppError {
-    if err.is_timeout() {
-        deadline()
-    } else {
-        AppError::new(
-            ErrorCode::Internal,
-            "The connection failed or the response was interrupted",
-        )
-    }
-}
-
-pub(crate) fn map_io_err(err: std::io::Error) -> AppError {
-    if matches!(err.raw_os_error(), Some(28 | 112))
-        || err.to_string().to_lowercase().contains("no space")
-    {
-        AppError::new(
-            ErrorCode::DiskFull,
-            "There is not enough disk space to save this file",
-        )
-    } else {
-        AppError::new(
-            ErrorCode::PathNotAllowed,
-            "The file could not be read or written; check folder permissions",
-        )
-    }
 }
 
 #[cfg(test)]
@@ -388,15 +446,16 @@ mod tests {
     async fn hashes_multiple_buffers_and_empty_files() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("fixture.bin");
+        let (_tx, cancel) = cancel_pair();
         let body: Vec<u8> = (0..200_000).map(|index| (index % 251) as u8).collect();
         tokio::fs::write(&path, &body).await.unwrap();
         assert_eq!(
-            hash_file(&path).await.unwrap(),
+            hash_file(&path, &cancel).await.unwrap(),
             hex::encode(Sha256::digest(&body))
         );
         tokio::fs::write(&path, []).await.unwrap();
         assert_eq!(
-            hash_file(&path).await.unwrap(),
+            hash_file(&path, &cancel).await.unwrap(),
             hex::encode(Sha256::digest([]))
         );
     }
@@ -495,7 +554,7 @@ mod tests {
                 |_| {},
             )
             .await;
-            assert!(result.is_err(), "{headers}");
+            assert!(!result.unwrap_err().retryable, "{headers}");
             assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello");
             server.await.unwrap();
         }
@@ -561,7 +620,9 @@ mod tests {
                 );
                 assert_eq!(tokio::fs::read(&path).await.unwrap(), expected);
             } else {
-                assert!(result.is_err());
+                let error = result.unwrap_err();
+                assert_eq!(error.code, ErrorCode::NetworkInterrupted);
+                assert!(error.retryable);
             }
             server.await.unwrap();
         }
@@ -600,5 +661,310 @@ mod tests {
             cancel_task.await.unwrap();
             server.abort();
         }
+    }
+    #[tokio::test]
+    async fn http_failures_have_stable_actionable_codes_and_retry_policy() {
+        for (status, expected, retryable) in [
+            (400, ErrorCode::HttpClientError, false),
+            (401, ErrorCode::HttpUnauthorized, false),
+            (403, ErrorCode::HttpForbidden, false),
+            (404, ErrorCode::HttpNotFound, false),
+            (408, ErrorCode::NetworkTimeout, true),
+            (410, ErrorCode::HttpNotFound, false),
+            (416, ErrorCode::RangeUnsupported, false),
+            (422, ErrorCode::HttpClientError, false),
+            (429, ErrorCode::HttpRateLimit, true),
+            (500, ErrorCode::HttpServerError, true),
+            (503, ErrorCode::HttpServerError, true),
+            (302, ErrorCode::HttpRedirect, false),
+        ] {
+            let response = format!(
+                "HTTP/1.1 {status} Fixture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+            );
+            let (url, server) = serve(response.into_bytes(), false).await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("file.part");
+            let (_tx, cancel) = cancel_pair();
+            let error = download_to_file(
+                &Client::new(),
+                &format!("{url}?token=private"),
+                &path,
+                ResumeMetadata::default(),
+                &cancel,
+                |_| panic!("Failed response cannot be accepted"),
+                |_| {},
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.code, expected, "HTTP {status}");
+            assert_eq!(error.retryable, retryable, "HTTP {status}");
+            assert!(error.message.contains(&format!("HTTP {status}")));
+            assert!(!error.message.contains("private"));
+            assert!(!path.exists());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_connections_are_retryable_without_exposing_the_url() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/private?signature=secret",
+            listener.local_addr().unwrap()
+        );
+        drop(listener);
+        let error = map_reqwest_err(Client::new().get(url).send().await.unwrap_err());
+        assert_eq!(error.code, ErrorCode::NetworkConnection);
+        assert!(error.retryable);
+        assert!(!error.message.contains("secret"));
+        assert!(!error.message.contains("private"));
+    }
+
+    #[tokio::test]
+    async fn header_and_body_deadlines_use_the_real_transfer_path_and_keep_partials() {
+        assert_eq!(TransferTimeouts::default().headers, Duration::from_secs(30));
+        assert_eq!(TransferTimeouts::default().body, Duration::from_secs(30));
+        // Small injected limits exercise the same path without spending 60 seconds per test.
+        for body_stall in [false, true] {
+            let response = if body_stall {
+                b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\nETag: \"fixture\"\r\n\r\nabc".to_vec()
+            } else {
+                Vec::new()
+            };
+            let (url, server) = serve(response, true).await;
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("file.part");
+            let (_tx, cancel) = cancel_pair();
+            let client = Client::new();
+            let mut metadata_accepted = false;
+            let error = tokio::time::timeout(
+                Duration::from_secs(2),
+                transfer(
+                    TransferRequest {
+                        client: &client,
+                        url: &url,
+                        dest: &path,
+                        files: None,
+                        resume: ResumeMetadata::default(),
+                        cancel: &cancel,
+                        timeouts: TransferTimeouts {
+                            headers: Duration::from_millis(200),
+                            body: Duration::from_millis(200),
+                        },
+                    },
+                    |_| {
+                        metadata_accepted = true;
+                        Ok(())
+                    },
+                    |_| {},
+                ),
+            )
+            .await
+            .unwrap()
+            .unwrap_err();
+            assert_eq!(error.code, ErrorCode::NetworkTimeout);
+            assert!(error.retryable);
+            assert_eq!(metadata_accepted, body_stall);
+            if body_stall {
+                assert!(error.message.contains("file data"));
+                assert_eq!(tokio::fs::read(&path).await.unwrap(), b"abc");
+            } else {
+                assert!(error.message.contains("response headers"));
+                assert!(!path.exists());
+            }
+            server.abort();
+        }
+    }
+
+    #[tokio::test]
+    async fn verification_cancels_after_reading_data_while_waiting_for_more() {
+        let (reader, mut writer) = tokio::io::duplex(1024);
+        let (tx, cancel) = cancel_pair();
+        let hashing = tokio::spawn(async move { hash_reader(reader, &cancel).await });
+        // More than the duplex capacity proves the verifier has started consuming data.
+        writer.write_all(&vec![3; 64 * 1024]).await.unwrap();
+        tx.send(true).unwrap();
+        let error = tokio::time::timeout(Duration::from_secs(1), hashing)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidTransition);
+        // Writer is still alive: EOF did not terminate the hash.
+        drop(writer);
+    }
+
+    #[tokio::test]
+    async fn verification_cancellation_is_not_starved_by_an_always_ready_reader() {
+        let (tx, cancel) = cancel_pair();
+        let hashing = tokio::spawn(async move { hash_reader(tokio::io::repeat(1), &cancel).await });
+        tokio::task::yield_now().await;
+        tx.send(true).unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), hashing)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err()
+                .code,
+            ErrorCode::InvalidTransition
+        );
+    }
+
+    #[tokio::test]
+    async fn verification_of_an_actual_file_respects_preexisting_cancellation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.bin");
+        tokio::fs::write(&path, b"fixture").await.unwrap();
+        let (tx, cancel) = cancel_pair();
+        tx.send(true).unwrap();
+        assert_eq!(
+            hash_file(&path, &cancel).await.unwrap_err().code,
+            ErrorCode::InvalidTransition
+        );
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"fixture");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn untrusted_tls_certificate_is_classified_and_never_bypassed() {
+        use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
+        use std::process::Command;
+        use std::sync::Arc;
+        // Generate an ephemeral fixture key at runtime; no private key is committed.
+        let dir = tempfile::tempdir().unwrap();
+        for args in [
+            vec![
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                "/CN=localhost",
+                "-keyout",
+                "key.pem",
+                "-out",
+                "cert.pem",
+            ],
+            vec![
+                "x509", "-in", "cert.pem", "-outform", "DER", "-out", "cert.der",
+            ],
+            vec![
+                "pkcs8", "-topk8", "-nocrypt", "-in", "key.pem", "-outform", "DER", "-out",
+                "key.der",
+            ],
+        ] {
+            assert!(
+                Command::new("openssl")
+                    .args(args)
+                    .current_dir(dir.path())
+                    .output()
+                    .expect("TLS integration fixture requires openssl on Unix")
+                    .status
+                    .success()
+            );
+        }
+        let certificate = CertificateDer::from(std::fs::read(dir.path().join("cert.der")).unwrap());
+        let key = PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(
+            std::fs::read(dir.path().join("key.der")).unwrap(),
+        ));
+        let config = rustls::ServerConfig::builder_with_provider(Arc::new(
+            rustls::crypto::ring::default_provider(),
+        ))
+        .with_safe_default_protocol_versions()
+        .unwrap()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key)
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (socket, _) = listener.accept().await.unwrap();
+            let _ = tokio_rustls::TlsAcceptor::from(Arc::new(config))
+                .accept(socket)
+                .await;
+        });
+        let error = Client::new()
+            .get(format!("https://{address}/file?signature=private"))
+            .send()
+            .await
+            .unwrap_err();
+        let classified = map_reqwest_err(error);
+        assert_eq!(classified.code, ErrorCode::TlsError);
+        assert!(!classified.retryable);
+        assert!(!classified.message.contains("private"));
+        server.await.unwrap();
+    }
+    #[tokio::test]
+    async fn redirect_loops_have_a_permanent_redacted_error() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!(
+            "http://{}/loop?token=private",
+            listener.local_addr().unwrap()
+        );
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut buffer = [0; 4096];
+                let _ = socket.read(&mut buffer).await;
+                socket.write_all(b"HTTP/1.1 302 Found\r\nLocation: /loop?token=private\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+            }
+        });
+        let client = Client::builder()
+            .redirect(reqwest::redirect::Policy::limited(1))
+            .build()
+            .unwrap();
+        let error = map_reqwest_err(client.get(url).send().await.unwrap_err());
+        assert_eq!(error.code, ErrorCode::HttpRedirect);
+        assert!(!error.retryable);
+        assert!(!error.message.contains("private"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn body_deadline_measures_inactivity_rather_than_total_download_time() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/fixture", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 4096];
+            let _ = socket.read(&mut buffer).await;
+            socket
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\n")
+                .await
+                .unwrap();
+            for _ in 0..6 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
+                socket.write_all(b"x").await.unwrap();
+            }
+        });
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.part");
+        let client = Client::new();
+        let (_tx, cancel) = cancel_pair();
+        let result = transfer(
+            TransferRequest {
+                client: &client,
+                url: &url,
+                dest: &path,
+                files: None,
+                resume: ResumeMetadata::default(),
+                cancel: &cancel,
+                timeouts: TransferTimeouts {
+                    headers: Duration::from_secs(2),
+                    body: Duration::from_millis(200),
+                },
+            },
+            |_| Ok(()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.bytes_written, 6);
+        assert_eq!(result.sha256_hex, hex::encode(Sha256::digest(b"xxxxxx")));
+        server.await.unwrap();
     }
 }

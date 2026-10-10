@@ -11,6 +11,9 @@ const { nativeCommands } = await import('./commands')
 const sampleTask = {
   id: 'task-1',
   url: 'https://example.com/file.bin',
+  expectedSha256: null,
+  actualSha256: null,
+  checksumResult: null,
   fileName: 'file.bin',
   destinationId: 'default',
   status: 'queued',

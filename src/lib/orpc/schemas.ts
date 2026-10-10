@@ -31,8 +31,21 @@ export const errorCodeSchema = z.enum([
   'RESOURCE_CHANGED',
   'RANGE_UNSUPPORTED',
   'CHECKSUM_MISMATCH',
+  'LENGTH_MISMATCH',
+  'URL_NOT_ALLOWED',
   'TASK_NOT_FOUND',
   'INVALID_TRANSITION',
+  'DATA_DIRECTORY_IN_USE',
+  'NETWORK_CONNECTION',
+  'NETWORK_INTERRUPTED',
+  'TLS_ERROR',
+  'HTTP_NOT_FOUND',
+  'HTTP_CLIENT_ERROR',
+  'HTTP_SERVER_ERROR',
+  'HTTP_REDIRECT',
+  'STORAGE_PERMISSION',
+  'STORAGE_NOT_FOUND',
+  'STORAGE_ERROR',
   'INTERNAL',
 ])
 
@@ -53,6 +66,9 @@ export const downloadTaskSchema = z.object({
   speedBytesPerSecond: safeByteCount,
   revision: z.number().int().nonnegative(),
   error: taskErrorSchema.nullable(),
+  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
+  actualSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
+  checksumResult: z.enum(['computed', 'matched', 'mismatch']).nullable().default(null),
   createdAt: z.string().min(1),
   updatedAt: z.string().min(1),
 })
@@ -63,6 +79,7 @@ export const createDownloadInputSchema = z.object({
   suggestedName: z.string().min(1).optional(),
   startNow: z.boolean().optional(),
   requestId: z.string().min(1).optional(),
+  expectedSha256: z.string().trim().regex(/^[a-f0-9]{64}$/i).optional(),
 })
 
 export const downloadIdInputSchema = z.object({

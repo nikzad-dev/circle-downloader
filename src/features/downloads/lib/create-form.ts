@@ -10,5 +10,6 @@ export const createFormSchema = z.object({
   }, 'Use HTTPS, or HTTP for localhost only.'),
   suggestedName: z.string().trim(),
   startNow: z.boolean(),
+  expectedSha256: z.string().trim().refine(value => value === '' || /^[a-f0-9]{64}$/i.test(value), 'Enter a 64-character SHA-256 checksum.').optional(),
 })
 export type CreateFormValues = z.infer<typeof createFormSchema>

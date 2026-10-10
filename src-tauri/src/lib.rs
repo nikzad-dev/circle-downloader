@@ -6,6 +6,7 @@ mod ipc;
 
 use application::DownloadManager;
 use infrastructure::db::Database;
+use infrastructure::ownership::DataDirectoryLease;
 use ipc::progress::ProgressHub;
 use std::path::PathBuf;
 
@@ -26,15 +27,11 @@ fn default_data_dir() -> PathBuf {
 }
 
 pub fn build_state(data_dir: PathBuf) -> Result<AppState, domain::AppError> {
-    std::fs::create_dir_all(&data_dir).map_err(|e| {
-        domain::AppError::new(
-            domain::ErrorCode::PathNotAllowed,
-            format!("Cannot create data dir: {e}"),
-        )
-    })?;
+    // Acquire before opening SQLite or reconciling files belonging to another process.
+    let lease = DataDirectoryLease::acquire(&data_dir)?;
     let db = Database::open(data_dir.join("circle-downloader.db"))?;
     let downloads = data_dir.join("downloads");
-    let manager = DownloadManager::new(db, downloads, ProgressHub::default())?;
+    let manager = DownloadManager::new(db, downloads, ProgressHub::default(), lease)?;
     manager.reconcile_on_startup()?;
     Ok(AppState { manager })
 }
@@ -42,10 +39,15 @@ pub fn build_state(data_dir: PathBuf) -> Result<AppState, domain::AppError> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let data_dir = default_data_dir();
-    let state = build_state(data_dir).expect("failed to initialize application state");
+    let state = match build_state(data_dir) {
+        Ok(state) => state,
+        Err(error) => {
+            eprintln!("Circle Downloader could not start: {}", error.message);
+            std::process::exit(1);
+        }
+    };
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_opener::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             commands::system::health_check,
@@ -72,3 +74,6 @@ mod api_tests;
 
 #[cfg(test)]
 mod contract_tests;
+
+#[cfg(test)]
+mod ownership_tests;

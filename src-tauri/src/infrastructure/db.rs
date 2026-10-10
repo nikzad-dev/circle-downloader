@@ -18,14 +18,21 @@ impl Database {
     pub fn open(path: impl AsRef<Path>) -> Result<Self, AppError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::new(
-                    ErrorCode::PathNotAllowed,
-                    format!("Cannot create db dir: {e}"),
-                )
-            })?;
+            std::fs::create_dir_all(parent).map_err(crate::infrastructure::errors::map_io_err)?;
         }
-        let conn = Connection::open(&path).map_err(map_db_err)?;
+        // macOS /var and legitimate user data roots may alias their canonical parent;
+        // SQLite NOFOLLOW then rejects substitutions of the database file itself.
+        let path = match (path.parent(), path.file_name()) {
+            (Some(parent), Some(name)) => std::fs::canonicalize(parent)
+                .map_err(crate::infrastructure::errors::map_io_err)?
+                .join(name),
+            _ => path,
+        };
+        let conn = Connection::open_with_flags(
+            &path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(map_db_err)?;
         let db = Self {
             conn: Arc::new(Mutex::new(conn)),
             path,
@@ -49,7 +56,9 @@ impl Database {
     }
 
     fn migrate(&self) -> Result<(), AppError> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        conn.pragma_update(None, "synchronous", "FULL")
+            .map_err(map_db_err)?;
         conn.execute_batch(
             r#"
             CREATE TABLE IF NOT EXISTS schema_migrations (
@@ -96,6 +105,24 @@ impl Database {
             "#,
         )
         .map_err(map_db_err)?;
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_migrations", [], |r| {
+                r.get(0)
+            })
+            .map_err(map_db_err)?;
+        if version < 2 {
+            let transaction = conn.transaction().map_err(map_db_err)?;
+            transaction
+                .execute_batch(
+                    "ALTER TABLE downloads ADD COLUMN expected_sha256 TEXT;
+                ALTER TABLE downloads ADD COLUMN actual_sha256 TEXT;
+                ALTER TABLE downloads ADD COLUMN checksum_result TEXT;
+                ALTER TABLE downloads ADD COLUMN finalization TEXT;
+                INSERT INTO schema_migrations(version) VALUES(2);",
+                )
+                .map_err(map_db_err)?;
+            transaction.commit().map_err(map_db_err)?;
+        }
         Ok(())
     }
 
@@ -106,7 +133,7 @@ impl Database {
                 "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                         downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                         error_code, error_message, error_retryable, etag, last_modified,
-                        request_id, retry_count, created_at, updated_at
+                        request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
                  FROM downloads ORDER BY created_at ASC",
             )
             .map_err(map_db_err)?;
@@ -124,7 +151,7 @@ impl Database {
             "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                     downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                     error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at
+                    request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
              FROM downloads WHERE id = ?1",
             params![id],
             map_task_row,
@@ -140,7 +167,7 @@ impl Database {
             "SELECT id, url, file_name, destination_id, temp_path, final_path, status,
                     downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                     error_code, error_message, error_retryable, etag, last_modified,
-                    request_id, retry_count, created_at, updated_at
+                    request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
              FROM downloads WHERE request_id = ?1",
             params![request_id],
             map_task_row,
@@ -164,8 +191,8 @@ impl Database {
                 id, url, file_name, destination_id, temp_path, final_path, status,
                 downloaded_bytes, total_bytes, speed_bytes_per_second, revision,
                 error_code, error_message, error_retryable, etag, last_modified,
-                request_id, retry_count, created_at, updated_at
-             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20)
+                request_id, retry_count, created_at, updated_at, expected_sha256, actual_sha256, checksum_result, finalization
+             ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18,?19,?20,?21,?22,?23,?24)
              ON CONFLICT(id) DO UPDATE SET
                 url=excluded.url,
                 file_name=excluded.file_name,
@@ -184,7 +211,9 @@ impl Database {
                 last_modified=excluded.last_modified,
                 request_id=excluded.request_id,
                 retry_count=excluded.retry_count,
-                updated_at=excluded.updated_at",
+                updated_at=excluded.updated_at,
+                expected_sha256=excluded.expected_sha256, actual_sha256=excluded.actual_sha256,
+                checksum_result=excluded.checksum_result, finalization=excluded.finalization",
             params![
                 task.id,
                 task.url,
@@ -206,6 +235,7 @@ impl Database {
                 task.retry_count as i64,
                 task.created_at.to_rfc3339(),
                 task.updated_at.to_rfc3339(),
+                task.expected_sha256, task.actual_sha256, task.checksum_result, task.finalization,
             ],
         )
         .map_err(map_db_err)?;
@@ -303,7 +333,20 @@ impl Database {
 }
 
 fn map_db_err(err: rusqlite::Error) -> AppError {
-    AppError::new(ErrorCode::Internal, format!("Database error: {err}"))
+    let code = match &err {
+        rusqlite::Error::SqliteFailure(error, _) => match error.code {
+            rusqlite::ErrorCode::DiskFull => ErrorCode::DiskFull,
+            rusqlite::ErrorCode::PermissionDenied | rusqlite::ErrorCode::ReadOnly => {
+                ErrorCode::StoragePermission
+            }
+            _ => ErrorCode::StorageError,
+        },
+        _ => ErrorCode::StorageError,
+    };
+    AppError::new(
+        code,
+        "The download database could not be read or updated. Check disk space and data-folder permissions, then reopen the app.",
+    )
 }
 
 fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
@@ -337,6 +380,10 @@ fn map_task_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<DownloadTask> {
         last_modified: row.get(15)?,
         request_id: row.get(16)?,
         retry_count: row.get::<_, i64>(17)? as u32,
+        expected_sha256: row.get(20)?,
+        actual_sha256: row.get(21)?,
+        checksum_result: row.get(22)?,
+        finalization: row.get(23)?,
         created_at,
         updated_at,
     })
@@ -349,23 +396,7 @@ fn parse_dt(value: &str) -> rusqlite::Result<DateTime<Utc>> {
 }
 
 fn parse_error_code(code: &str) -> ErrorCode {
-    match code {
-        "INVALID_URL" => ErrorCode::InvalidUrl,
-        "UNSUPPORTED_SCHEME" => ErrorCode::UnsupportedScheme,
-        "PATH_NOT_ALLOWED" => ErrorCode::PathNotAllowed,
-        "ALREADY_EXISTS" => ErrorCode::AlreadyExists,
-        "DISK_FULL" => ErrorCode::DiskFull,
-        "NETWORK_TIMEOUT" => ErrorCode::NetworkTimeout,
-        "HTTP_UNAUTHORIZED" => ErrorCode::HttpUnauthorized,
-        "HTTP_FORBIDDEN" => ErrorCode::HttpForbidden,
-        "HTTP_RATE_LIMIT" => ErrorCode::HttpRateLimit,
-        "RESOURCE_CHANGED" => ErrorCode::ResourceChanged,
-        "RANGE_UNSUPPORTED" => ErrorCode::RangeUnsupported,
-        "CHECKSUM_MISMATCH" => ErrorCode::ChecksumMismatch,
-        "TASK_NOT_FOUND" => ErrorCode::TaskNotFound,
-        "INVALID_TRANSITION" => ErrorCode::InvalidTransition,
-        _ => ErrorCode::Internal,
-    }
+    serde_json::from_value(serde_json::Value::String(code.into())).unwrap_or(ErrorCode::Internal)
 }
 
 #[cfg(test)]
@@ -404,10 +435,57 @@ mod tests {
             last_modified: None,
             request_id: Some("req-1".into()),
             retry_count: 0,
+            expected_sha256: None,
+            actual_sha256: None,
+            checksum_result: None,
+            finalization: None,
         };
         db.upsert_download(&task).unwrap();
         assert_eq!(db.list_downloads().unwrap().len(), 1);
         assert_eq!(db.get_download("t1").unwrap().file_name, "a.bin");
         assert_eq!(db.list_queues().unwrap()[0].task_count, 1);
+    }
+}
+
+#[cfg(test)]
+mod error_contract_tests {
+    use super::*;
+    #[test]
+    fn all_native_error_codes_survive_database_decoding() {
+        for code in ErrorCode::ALL {
+            assert_eq!(parse_error_code(code.as_str()), *code);
+        }
+        assert_eq!(parse_error_code("FUTURE_UNKNOWN"), ErrorCode::Internal);
+    }
+}
+
+#[cfg(test)]
+mod migration_tests {
+    use super::*;
+    #[test]
+    fn existing_v1_rows_survive_transactional_checksum_upgrade_and_reopen() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("old.db");
+        let db = Database::open(&path).unwrap();
+        // Restore precisely the v1 column/version shape, then open via the real migration.
+        db.conn.lock().execute_batch("ALTER TABLE downloads DROP COLUMN expected_sha256;
+            ALTER TABLE downloads DROP COLUMN actual_sha256; ALTER TABLE downloads DROP COLUMN checksum_result;
+            ALTER TABLE downloads DROP COLUMN finalization; DELETE FROM schema_migrations WHERE version=2;
+            INSERT INTO downloads(id,url,file_name,destination_id,status,created_at,updated_at)
+            VALUES('legacy','https://example.com/file','file','default','paused','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');").unwrap();
+        drop(db);
+        for _ in 0..2 {
+            let db = Database::open(&path).unwrap();
+            let task = db.get_download("legacy").unwrap();
+            assert_eq!(task.file_name, "file");
+            assert!(task.actual_sha256.is_none());
+            assert!(task.checksum_result.is_none());
+            let sync: i64 = db
+                .conn
+                .lock()
+                .query_row("PRAGMA synchronous", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(sync, 2);
+        }
     }
 }

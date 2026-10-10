@@ -6,7 +6,9 @@ use crate::domain::{
     RemoveDownloadRequest, RemoveDownloadResult, Settings, TaskError, UpdateSettingsRequest,
 };
 use crate::infrastructure::db::Database;
-use crate::infrastructure::http::{ResumeMetadata, cancel_pair, download_to_file};
+use crate::infrastructure::files::ManagedFiles;
+use crate::infrastructure::http::{ResumeMetadata, cancel_pair, download_managed};
+use crate::infrastructure::ownership::DataDirectoryLease;
 use crate::ipc::progress::ProgressHub;
 use chrono::Utc;
 use parking_lot::Mutex;
@@ -29,7 +31,9 @@ pub struct DownloadManager {
 
 struct ManagerInner {
     db: Database,
+    _data_dir_lease: DataDirectoryLease,
     download_dir: PathBuf,
+    files: ManagedFiles,
     http: Client,
     progress: ProgressHub,
     workers: Mutex<HashMap<String, WorkerHandle>>,
@@ -42,21 +46,16 @@ impl DownloadManager {
         db: Database,
         download_dir: PathBuf,
         progress: ProgressHub,
+        data_dir_lease: DataDirectoryLease,
     ) -> Result<Self, AppError> {
-        std::fs::create_dir_all(&download_dir).map_err(|e| {
-            AppError::new(
-                ErrorCode::PathNotAllowed,
-                format!("Cannot create download dir: {e}"),
-            )
-        })?;
-        let http = Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(5))
-            .build()
-            .map_err(|e| AppError::new(ErrorCode::Internal, e.to_string()))?;
+        let files = ManagedFiles::new(&download_dir)?;
+        let http = crate::infrastructure::network::client()?;
         Ok(Self {
             inner: Arc::new(ManagerInner {
                 db,
+                _data_dir_lease: data_dir_lease,
                 download_dir,
+                files,
                 http,
                 progress,
                 workers: Mutex::new(HashMap::new()),
@@ -76,32 +75,18 @@ impl DownloadManager {
 
     pub fn reconcile_on_startup(&self) -> Result<(), AppError> {
         for mut task in self.inner.db.list_downloads()? {
-            if matches!(
-                task.status,
-                DownloadStatus::Connecting
-                    | DownloadStatus::Downloading
-                    | DownloadStatus::Verifying
-            ) {
-                let partial_exists = task
-                    .temp_path
-                    .as_ref()
-                    .map(|p| Path::new(p).exists())
-                    .unwrap_or(false);
+            let recovery = reconcile_task(&self.inner, &mut task);
+            if let Err(error) = recovery {
                 task.status = DownloadStatus::Failed;
                 task.error = Some(TaskError {
-                    code: ErrorCode::Internal,
-                    message: if partial_exists {
-                        "Interrupted by application restart; retry to continue".into()
-                    } else {
-                        "Interrupted by application restart; partial file missing".into()
-                    },
-                    retryable: true,
+                    code: error.code,
+                    message: error.message,
+                    retryable: error.retryable,
                 });
                 task.speed_bytes_per_second = 0;
-                task.bump_revision();
-                self.inner.db.upsert_download(&task)?;
-                self.emit_progress(&task);
             }
+            task.bump_revision();
+            self.inner.db.upsert_download(&task)?;
         }
         Ok(())
     }
@@ -123,10 +108,17 @@ impl DownloadManager {
         }
 
         let url = validate_download_url(&req.url)?;
+        let expected_sha256 = crate::domain::task::normalize_sha256(req.expected_sha256)?;
         let settings = self.inner.db.get_settings()?;
         let destination_id = req
             .destination_id
             .unwrap_or(settings.default_destination_id);
+        if destination_id != "default" {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Only the app-managed download folder is approved.",
+            ));
+        }
         let file_name = match req.suggested_name {
             Some(name) => sanitize_filename(&name)?,
             None => filename_from_url(url.as_str()),
@@ -172,6 +164,10 @@ impl DownloadManager {
             last_modified: None,
             request_id: req.request_id,
             retry_count: 0,
+            expected_sha256,
+            actual_sha256: None,
+            checksum_result: None,
+            finalization: None,
         };
         self.inner.db.upsert_download(&task)?;
         self.emit_progress(&task);
@@ -200,10 +196,9 @@ impl DownloadManager {
         let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
         ensure_transition(task.status, DownloadStatus::Queued)?;
-        if let Some(temp) = &task.temp_path
-            && let Ok(meta) = std::fs::metadata(temp)
-        {
-            task.downloaded_bytes = meta.len();
+        if let Some(temp) = &task.temp_path {
+            let name = managed_name(&self.inner, temp)?;
+            task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
         }
         task.status = DownloadStatus::Queued;
         task.error = None;
@@ -237,10 +232,9 @@ impl DownloadManager {
     fn refresh_partial(&self, id: &str) -> Result<DownloadTask, AppError> {
         let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
-        if let Some(temp) = &task.temp_path
-            && let Ok(meta) = std::fs::metadata(temp)
-        {
-            task.downloaded_bytes = meta.len();
+        if let Some(temp) = &task.temp_path {
+            let name = managed_name(&self.inner, temp)?;
+            task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
             task.bump_revision();
             self.inner.db.upsert_download(&task)?;
             self.emit_progress(&task);
@@ -296,10 +290,8 @@ impl DownloadManager {
         let task = self.inner.db.get_download(&req.id)?;
         if req.delete_partial
             && let Some(temp) = &task.temp_path
-            && let Err(error) = std::fs::remove_file(temp)
-            && error.kind() != std::io::ErrorKind::NotFound
         {
-            return Err(crate::infrastructure::http::map_io_err(error));
+            self.inner.files.remove(&managed_name(&self.inner, temp)?)?;
         }
         self.inner.db.remove_download(&req.id)?;
         Ok(RemoveDownloadResult { removed: true })
@@ -310,6 +302,16 @@ impl DownloadManager {
     }
 
     pub fn update_settings(&self, patch: UpdateSettingsRequest) -> Result<Settings, AppError> {
+        if patch
+            .default_destination_id
+            .as_deref()
+            .is_some_and(|id| id != "default")
+        {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Only the app-managed download folder is approved.",
+            ));
+        }
         self.inner.db.update_settings(patch)
     }
 
@@ -430,11 +432,15 @@ async fn execute_download(
         .clone()
         .ok_or_else(|| AppError::new(ErrorCode::Internal, "Missing final path"))?;
 
-    let resume_from = if Path::new(&temp_path).exists() {
-        std::fs::metadata(&temp_path).map(|m| m.len()).unwrap_or(0)
-    } else {
-        0
-    };
+    let temp_name = managed_name(inner, &temp_path)?;
+    managed_name(inner, &final_path)?;
+    if task.finalization.is_some() {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "Restart Circle to recover the verified publication before retrying.",
+        ));
+    }
+    let resume_from = inner.files.length(&temp_name)?.unwrap_or(0);
     task.downloaded_bytes = resume_from;
 
     {
@@ -447,8 +453,8 @@ async fn execute_download(
         emit(inner, &task);
     }
 
-    let download = download_to_file(
-        &inner.http,
+    let download = download_managed(
+        (&inner.http, &inner.files),
         &task.url,
         Path::new(&temp_path),
         ResumeMetadata {
@@ -476,8 +482,14 @@ async fn execute_download(
         |update| {
             let _mutation = inner.mutations.lock();
             if let Ok(mut current) = inner.db.get_download(task_id)
-                && current.status == DownloadStatus::Downloading
+                && matches!(
+                    current.status,
+                    DownloadStatus::Downloading | DownloadStatus::Verifying
+                )
             {
+                if update.verifying {
+                    current.status = DownloadStatus::Verifying;
+                }
                 current.downloaded_bytes = update.transferred_bytes;
                 current.total_bytes = update.total_bytes.or(current.total_bytes);
                 current.speed_bytes_per_second = update.bytes_per_second;
@@ -503,7 +515,9 @@ async fn execute_download(
     let result = download?;
 
     let mut task = inner.db.get_download(task_id)?;
-    ensure_transition(task.status, DownloadStatus::Verifying)?;
+    if task.status != DownloadStatus::Verifying {
+        ensure_transition(task.status, DownloadStatus::Verifying)?;
+    }
     task.status = DownloadStatus::Verifying;
     task.downloaded_bytes = result.bytes_written;
     task.total_bytes = result.total_bytes.or(task.total_bytes);
@@ -512,42 +526,187 @@ async fn execute_download(
     inner.db.upsert_download(&task)?;
     emit(inner, &task);
 
-    if let Some(total) = task.total_bytes
-        && task.downloaded_bytes != total
+    // Length validation is separate from cryptographic checksum comparison.
+    if task
+        .total_bytes
+        .is_some_and(|total| task.downloaded_bytes != total)
     {
         return Err(AppError::new(
-            ErrorCode::ChecksumMismatch,
-            format!(
-                "Byte length mismatch: got {} expected {total}",
-                task.downloaded_bytes
-            ),
+            ErrorCode::LengthMismatch,
+            "The received byte length did not match the response.",
         ));
     }
-
-    // A hard link publishes the complete file atomically without replacing an existing path.
-    // Both names are in the managed directory and therefore on the same filesystem.
-    std::fs::hard_link(&temp_path, &final_path).map_err(|error| {
-        if error.kind() == std::io::ErrorKind::AlreadyExists {
-            AppError::new(
-                ErrorCode::AlreadyExists,
-                "The destination filename is already in use; the partial file was kept",
-            )
-        } else {
-            crate::infrastructure::http::map_io_err(error)
+    task.actual_sha256 = Some(result.sha256_hex.clone());
+    task.checksum_result = Some(
+        match &task.expected_sha256 {
+            Some(expected) if expected != &result.sha256_hex => "mismatch",
+            Some(_) => "matched",
+            None => "computed",
         }
-    })?;
-    std::fs::remove_file(&temp_path).map_err(crate::infrastructure::http::map_io_err)?;
+        .into(),
+    );
+    task.bump_revision();
+    inner.db.upsert_download(&task)?;
+    if task.checksum_result.as_deref() == Some("mismatch") {
+        return Err(AppError::new(
+            ErrorCode::ChecksumMismatch,
+            "SHA-256 did not match the supplied checksum. The partial file was kept; obtain a trusted link or checksum.",
+        ));
+    }
+    // File sync precedes the FULL-synchronous SQLite publication-intent checkpoint.
+    task.finalization = Some("ready".into());
+    task.bump_revision();
+    inner.db.upsert_download(&task)?;
+    inner.files.publish(
+        &temp_name,
+        &managed_name(inner, &final_path)?,
+        &result.sha256_hex,
+        Some(&result.verified_file),
+    )?;
+    complete_and_cleanup(inner, &mut task)?;
+    emit(inner, &task);
+    Ok(())
+}
 
-    let mut task = inner.db.get_download(task_id)?;
-    ensure_transition(task.status, DownloadStatus::Completed)?;
+fn managed_name(inner: &ManagerInner, path: &str) -> Result<PathBuf, AppError> {
+    let path = Path::new(path);
+    if path.parent() != Some(inner.download_dir.as_path()) {
+        return Err(AppError::new(
+            ErrorCode::PathNotAllowed,
+            "The saved download path is outside the approved folder.",
+        ));
+    }
+    Ok(PathBuf::from(inner.files.name(path)?))
+}
+
+fn complete_and_cleanup(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), AppError> {
     task.status = DownloadStatus::Completed;
     task.error = None;
     task.speed_bytes_per_second = 0;
-    task.temp_path = None;
+    task.finalization = Some("cleanup".into());
     task.bump_revision();
-    inner.db.upsert_download(&task)?;
-    emit(inner, &task);
-    let _ = result.sha256_hex;
+    inner.db.upsert_download(task)?; // Keep partial path until completed state is durable.
+    if let Some(temp) = &task.temp_path {
+        inner.files.remove(&managed_name(inner, temp)?)?;
+    }
+    task.temp_path = None;
+    task.finalization = None;
+    task.bump_revision();
+    inner.db.upsert_download(task)
+}
+
+fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), AppError> {
+    if task.status == DownloadStatus::Canceled {
+        task.finalization = None;
+        return Ok(());
+    }
+    let Some(final_path) = task.final_path.as_deref() else {
+        return Ok(());
+    };
+    let final_name = managed_name(inner, final_path)?;
+    let final_exists = inner.files.length(&final_name)?.is_some();
+    if task.finalization.is_some() {
+        if !matches!(task.finalization.as_deref(), Some("ready" | "cleanup")) {
+            return Err(AppError::new(
+                ErrorCode::ResourceChanged,
+                "The publication checkpoint is unsupported. Restore the database from a compatible version.",
+            ));
+        }
+        let digest = task.actual_sha256.as_deref().ok_or_else(|| {
+            AppError::new(
+                ErrorCode::ChecksumMismatch,
+                "The publication checkpoint has no verified digest.",
+            )
+        })?;
+        if task.checksum_result.as_deref() == Some("mismatch")
+            || task
+                .expected_sha256
+                .as_deref()
+                .is_some_and(|expected| expected != digest)
+        {
+            return Err(AppError::new(
+                ErrorCode::ChecksumMismatch,
+                "The saved checksum comparison failed.",
+            ));
+        }
+        if final_exists {
+            if inner.files.digest(&final_name)? != digest {
+                return Err(AppError::new(
+                    ErrorCode::ChecksumMismatch,
+                    "The final file differs from the verified checkpoint. Both files were kept.",
+                ));
+            }
+        } else {
+            let temp = task.temp_path.as_deref().ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::StorageNotFound,
+                    "The verified partial and final file are missing.",
+                )
+            })?;
+            inner
+                .files
+                .publish(&managed_name(inner, temp)?, &final_name, digest, None)?;
+        }
+        return complete_and_cleanup(inner, task);
+    }
+    if task.status == DownloadStatus::Completed {
+        if !final_exists {
+            return Err(AppError::new(
+                ErrorCode::StorageNotFound,
+                "The completed file is missing. Restore it or add a fresh download.",
+            ));
+        }
+        if let Some(digest) = &task.actual_sha256
+            && inner.files.digest(&final_name)? != *digest
+        {
+            return Err(AppError::new(
+                ErrorCode::ChecksumMismatch,
+                "The completed file changed after verification.",
+            ));
+        }
+        return Ok(());
+    }
+    if final_exists {
+        return Err(AppError::new(
+            ErrorCode::AlreadyExists,
+            "A final file exists without a verified publication checkpoint. It was kept; add a fresh download.",
+        ));
+    }
+    if let Some(temp) = &task.temp_path {
+        let length = inner.files.length(&managed_name(inner, temp)?)?;
+        match length {
+            Some(length) => {
+                if task.total_bytes.is_some_and(|total| length > total) {
+                    return Err(AppError::new(
+                        ErrorCode::LengthMismatch,
+                        "The partial file exceeds the saved response length.",
+                    ));
+                }
+                task.downloaded_bytes = length;
+            }
+            None if task.downloaded_bytes > 0 => {
+                task.downloaded_bytes = 0;
+                task.etag = None;
+                task.last_modified = None;
+                task.actual_sha256 = None;
+                task.checksum_result = None;
+                return Err(AppError::new(
+                    ErrorCode::StorageNotFound,
+                    "The partial file is missing. Add a fresh download.",
+                ));
+            }
+            None => {}
+        }
+    }
+    if task.status.is_active() {
+        task.status = DownloadStatus::Failed;
+        task.speed_bytes_per_second = 0;
+        task.error = Some(TaskError {
+            code: ErrorCode::NetworkInterrupted,
+            message: "Interrupted by application restart. Retry to continue safely.".into(),
+            retryable: true,
+        });
+    }
     Ok(())
 }
 

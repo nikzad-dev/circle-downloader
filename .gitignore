@@ -64,3 +64,6 @@ Desktop.ini
 *.sqlite-*
 *.sqlite3
 *.sqlite3-*
+
+# Persistent OS lease sentinel (do not remove while an app is running)
+.circle-downloader.lock
