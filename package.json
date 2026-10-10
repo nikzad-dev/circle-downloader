@@ -1,13 +1,20 @@
 {
   "name": "circle-downloader",
-  "private": true,
-  "version": "0.1.0",
   "type": "module",
+  "version": "0.1.0",
+  "private": true,
+  "imports": {
+    "#components/*": "./src/components/*.tsx",
+    "#lib/*": "./src/lib/*.ts",
+    "#hooks/*": "./src/hooks/*.ts"
+  },
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
     "preview": "vite preview",
-    "tauri": "tauri"
+    "tauri": "tauri",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
@@ -33,17 +40,15 @@
     "zod": "^4.6.5"
   },
   "devDependencies": {
+    "@antfu/eslint-config": "^9.5.1",
     "@tauri-apps/cli": "^2",
     "@types/node": "^26.6.5",
     "@types/react": "^19.1.8",
     "@types/react-dom": "^19.1.6",
     "@vitejs/plugin-react": "^6.0.2",
-    "typescript": "~6.0.3",
+    "eslint": "^10.12.0",
+    "eslint-plugin-format": "^2.0.1",
+    "typescript": "^6",
     "vite": "^8.0.16"
-  },
-  "imports": {
-    "#components/*": "./src/components/*.tsx",
-    "#lib/*": "./src/lib/*.ts",
-    "#hooks/*": "./src/hooks/*.ts"
   }
 }
