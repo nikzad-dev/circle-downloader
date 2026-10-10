@@ -1,5 +1,6 @@
+import type { ProgressEvent } from '../orpc/schemas'
 import { Channel, invoke } from '@tauri-apps/api/core'
-import { progressEventSchema, type ProgressEvent } from '../orpc/schemas'
+import { progressEventSchema } from '../orpc/schemas'
 import { normalizeNativeError } from './errors'
 
 /**

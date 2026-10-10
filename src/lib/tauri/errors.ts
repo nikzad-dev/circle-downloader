@@ -1,4 +1,5 @@
-import { appErrorSchema, type AppError, type ErrorCode } from '../orpc/schemas'
+import type { AppError, ErrorCode } from '../orpc/schemas'
+import { appErrorSchema } from '../orpc/schemas'
 
 export class NativeCommandError extends Error {
   readonly code: ErrorCode
@@ -27,7 +28,7 @@ export function normalizeNativeError(error: unknown): never {
     }
   }
 
-  if (error && typeof error === 'object') {
+  if (typeof error === 'object' && error !== null) {
     const record = error as Record<string, unknown>
     // Tauri often wraps as { message: string } containing JSON
     if (typeof record.message === 'string') {

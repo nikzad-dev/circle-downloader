@@ -1,3 +1,4 @@
+import type { CreateDownloadInput, Settings } from '../orpc/schemas'
 import { invoke } from '@tauri-apps/api/core'
 import {
   createDownloadInputSchema,
@@ -8,8 +9,6 @@ import {
   removeDownloadResultSchema,
   settingsSchema,
   updateSettingsInputSchema,
-  type CreateDownloadInput,
-  type Settings,
 } from '../orpc/schemas'
 import { normalizeNativeError } from './errors'
 

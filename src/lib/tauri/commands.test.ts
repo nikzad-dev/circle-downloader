@@ -1,9 +1,9 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 
-const invoke = vi.fn()
+const invoke = vi.fn<(...args: unknown[]) => Promise<unknown>>()
 
 vi.mock('@tauri-apps/api/core', () => ({
-  invoke: (...args: unknown[]) => invoke(...args),
+  invoke: async (...args: unknown[]): Promise<unknown> => invoke(...args),
 }))
 
 const { nativeCommands } = await import('./commands')
@@ -46,12 +46,14 @@ describe('nativeCommands', () => {
       url: 'https://example.com/file.bin',
       suggestedName: 'file.bin',
     })
-    expect(invoke).toHaveBeenCalledWith('create_download', {
-      input: expect.objectContaining({
+    expect(invoke).toHaveBeenCalledTimes(1)
+    const [, args] = invoke.mock.calls[0] ?? []
+    expect(args).toEqual({
+      input: {
         url: 'https://example.com/file.bin',
         suggestedName: 'file.bin',
         startNow: true,
-      }),
+      },
     })
   })
 

@@ -5,7 +5,7 @@ export default antfu(
     react: true,
 
     typescript: {
-      tsconfigPath: 'tsconfig.json',
+      tsconfigPath: 'tsconfig.eslint.json',
     },
 
     formatters: {
