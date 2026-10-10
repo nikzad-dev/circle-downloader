@@ -14,6 +14,12 @@ pub struct AppState {
 }
 
 fn default_data_dir() -> PathBuf {
+    // Isolate native development/QA runs without touching a user's downloads.
+    #[cfg(debug_assertions)]
+    if let Some(path) = std::env::var_os("CIRCLE_DOWNLOADER_DATA_DIR") {
+        return PathBuf::from(path);
+    }
+
     dirs::data_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join("circle-downloader")
@@ -52,6 +58,7 @@ pub fn run() {
             commands::downloads::retry_download,
             commands::downloads::remove_download,
             commands::downloads::subscribe_progress,
+            commands::downloads::unsubscribe_progress,
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::queues::list_queues,

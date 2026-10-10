@@ -9,8 +9,16 @@ pub struct ProgressHub {
 }
 
 impl ProgressHub {
-    pub fn subscribe(&self, channel: Channel<ProgressEvent>) {
-        self.listeners.lock().push(channel);
+    pub fn subscribe(&self, channel: Channel<ProgressEvent>) -> u32 {
+        let id = channel.id();
+        let mut listeners = self.listeners.lock();
+        listeners.retain(|listener| listener.id() != id);
+        listeners.push(channel);
+        id
+    }
+
+    pub fn unsubscribe(&self, id: u32) {
+        self.listeners.lock().retain(|channel| channel.id() != id);
     }
 
     pub fn emit(&self, event: ProgressEvent) {
@@ -24,6 +32,17 @@ mod tests {
     use super::*;
     use crate::domain::DownloadStatus;
     use chrono::Utc;
+
+    #[test]
+    fn unsubscribe_removes_the_native_listener() {
+        let hub = ProgressHub::default();
+        let channel = Channel::new(|_| Ok(()));
+        let id = hub.subscribe(channel);
+        assert_eq!(hub.listeners.lock().len(), 1);
+        hub.unsubscribe(id);
+        hub.unsubscribe(id);
+        assert_eq!(hub.listeners.lock().len(), 0);
+    }
 
     #[test]
     fn event_revision_is_monotonic_in_payload() {

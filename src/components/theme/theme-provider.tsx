@@ -1,64 +1,40 @@
-import { createContext, useEffect, useState } from 'react'
+import type { ReactNode } from 'react'
+import type { Theme } from './theme-context'
+import { useCallback, useLayoutEffect, useMemo, useState } from 'react'
+import { ThemeContext } from './theme-context'
 
-type Theme = 'dark' | 'light' | 'system'
-
-interface ThemeProviderProps {
-  children: React.ReactNode
-  defaultTheme?: Theme
-  storageKey?: string
-}
-
-interface ThemeProviderState {
-  theme: Theme
-  setTheme: (theme: Theme) => void
-}
-
-const initialState: ThemeProviderState = {
-  theme: 'system',
-  setTheme: () => null,
-}
-
-const ThemeProviderContext = createContext<ThemeProviderState>(initialState)
-
-export function ThemeProvider({
-  children,
-  defaultTheme = 'system',
-  storageKey = 'vite-ui-theme',
-  ...props
-}: ThemeProviderProps) {
-  const [theme, setTheme] = useState<Theme>(
-    () => (localStorage.getItem(storageKey) as Theme) || defaultTheme,
-  )
-
-  useEffect(() => {
-    const root = window.document.documentElement
-
-    root.classList.remove('light', 'dark')
-
-    if (theme === 'system') {
-      const systemTheme = window.matchMedia('(prefers-color-scheme: dark)')
-        .matches
-        ? 'dark'
-        : 'light'
-
-      root.classList.add(systemTheme)
-      return
+export function ThemeProvider({ children, defaultTheme = 'system', storageKey = 'vite-ui-theme' }: { children: ReactNode, defaultTheme?: Theme, storageKey?: string }) {
+  const [selectedTheme, setSelectedTheme] = useState<Theme>(() => {
+    try {
+      const stored = localStorage.getItem(storageKey)
+      return stored === 'light' || stored === 'dark' || stored === 'system' ? stored : defaultTheme
     }
-
-    root.classList.add(theme)
-  }, [theme])
-
-  const value = {
-    theme,
-    setTheme: (theme: Theme) => {
-      localStorage.setItem(storageKey, theme)
-      setTheme(theme)
-    },
-  }
-
-  return (
-    <ThemeProviderContext {...props} value={value}>
-      {children}
-    </ThemeProviderContext>
-  )
+    catch {
+      return defaultTheme
+    }
+  })
+  useLayoutEffect(() => {
+    const media = window.matchMedia('(prefers-color-scheme: dark)')
+    const apply = () => {
+      const resolved = selectedTheme === 'system' ? (media.matches ? 'dark' : 'light') : selectedTheme
+      document.documentElement.classList.remove('light', 'dark')
+      document.documentElement.classList.add(resolved)
+      document.documentElement.style.colorScheme = resolved
+    }
+    apply()
+    if (selectedTheme !== 'system')
+      return
+    media.addEventListener('change', apply)
+    return () => media.removeEventListener('change', apply)
+  }, [selectedTheme])
+  const setTheme = useCallback((next: Theme) => {
+    setSelectedTheme(next)
+    try {
+      localStorage.setItem(storageKey, next)
+    }
+    catch {
+      /* Appearance works without storage. */ }
+  }, [storageKey])
+  const value = useMemo(() => ({ theme: selectedTheme, setTheme }), [selectedTheme, setTheme])
+  return <ThemeContext value={value}>{children}</ThemeContext>
 }

@@ -3,9 +3,8 @@ use url::Url;
 
 /// Allow https everywhere; allow http only for loopback (fixture/integration tests).
 pub fn validate_download_url(raw: &str) -> Result<Url, AppError> {
-    let url = Url::parse(raw).map_err(|_| {
-        AppError::new(ErrorCode::InvalidUrl, format!("Invalid URL: {raw}"))
-    })?;
+    let url = Url::parse(raw)
+        .map_err(|_| AppError::new(ErrorCode::InvalidUrl, format!("Invalid URL: {raw}")))?;
 
     match url.scheme() {
         "https" => Ok(url),

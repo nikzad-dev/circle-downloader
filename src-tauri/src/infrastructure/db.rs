@@ -4,7 +4,7 @@ use crate::domain::{
 };
 use chrono::{DateTime, Utc};
 use parking_lot::Mutex;
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -19,7 +19,10 @@ impl Database {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(|e| {
-                AppError::new(ErrorCode::PathNotAllowed, format!("Cannot create db dir: {e}"))
+                AppError::new(
+                    ErrorCode::PathNotAllowed,
+                    format!("Cannot create db dir: {e}"),
+                )
             })?;
         }
         let conn = Connection::open(&path).map_err(map_db_err)?;

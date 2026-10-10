@@ -73,7 +73,9 @@ impl DownloadManager {
         for mut task in self.inner.db.list_downloads()? {
             if matches!(
                 task.status,
-                DownloadStatus::Connecting | DownloadStatus::Downloading | DownloadStatus::Verifying
+                DownloadStatus::Connecting
+                    | DownloadStatus::Downloading
+                    | DownloadStatus::Verifying
             ) {
                 let partial_exists = task
                     .temp_path
@@ -140,7 +142,11 @@ impl DownloadManager {
             url: url.to_string(),
             file_name,
             destination_id,
-            status: DownloadStatus::Queued,
+            status: if start_now {
+                DownloadStatus::Queued
+            } else {
+                DownloadStatus::Paused
+            },
             downloaded_bytes: 0,
             total_bytes: None,
             speed_bytes_per_second: 0,
@@ -287,7 +293,7 @@ impl DownloadManager {
             },
         );
 
-        tokio::spawn(async move {
+        tauri::async_runtime::spawn(async move {
             run_download_job(inner, task_id, cancel_token).await;
         });
     }
@@ -367,10 +373,7 @@ async fn execute_download(
     } else if task.status != DownloadStatus::Connecting {
         return Err(AppError::new(
             ErrorCode::InvalidTransition,
-            format!(
-                "Worker cannot start from status {}",
-                task.status.as_str()
-            ),
+            format!("Worker cannot start from status {}", task.status.as_str()),
         ));
     }
 

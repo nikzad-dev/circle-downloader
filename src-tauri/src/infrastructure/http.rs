@@ -1,6 +1,6 @@
 use crate::domain::{AppError, ErrorCode};
 use futures_util::StreamExt;
-use reqwest::{header, Client, StatusCode};
+use reqwest::{Client, StatusCode, header};
 use sha2::{Digest, Sha256};
 use std::path::Path;
 use std::time::Instant;
@@ -130,7 +130,9 @@ pub async fn download_to_file(
     };
 
     if let Some(parent) = dest.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(map_io_err)?;
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(map_io_err)?;
     }
 
     let mut file = if resume_from > 0 {

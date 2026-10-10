@@ -64,7 +64,7 @@ function ChartContainer({
         data-slot="chart"
         data-chart={chartId}
         className={cn(
-          'flex aspect-video justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-cartesian-grid_line[stroke=\'#ccc\']]:stroke-border/50 [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-dot[stroke=\'#fff\']]:stroke-transparent [&_.recharts-layer]:outline-hidden [&_.recharts-polar-grid_[stroke=\'#ccc\']]:stroke-border [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-reference-line_[stroke=\'#ccc\']]:stroke-border [&_.recharts-sector]:outline-hidden [&_.recharts-sector[stroke=\'#fff\']]:stroke-transparent [&_.recharts-surface]:outline-hidden',
+          'flex aspect-video justify-center text-xs [&_.recharts-cartesian-axis-tick_text]:fill-muted-foreground [&_.recharts-curve.recharts-tooltip-cursor]:stroke-border [&_.recharts-layer]:outline-hidden [&_.recharts-radial-bar-background-sector]:fill-muted [&_.recharts-rectangle.recharts-tooltip-cursor]:fill-muted [&_.recharts-sector]:outline-hidden [&_.recharts-surface]:outline-hidden',
           className,
         )}
         {...props}
@@ -76,7 +76,7 @@ function ChartContainer({
           {children}
         </RechartsPrimitive.ResponsiveContainer>
       </div>
-    </ChartContext.Provider>
+    </ChartContext.Provider >
   )
 }
 
@@ -97,13 +97,13 @@ function ChartStyle({ id, config }: { id: string, config: ChartConfig }) {
             ([theme, prefix]) => `
 ${prefix} [data-chart=${id}] {
 ${colorConfig
-      .map(([key, itemConfig]) => {
-        const color
-          = itemConfig.theme?.[theme as keyof typeof itemConfig.theme]
-            ?? itemConfig.color
-        return color ? `  --color-${key}: ${color};` : null
-      })
-      .join('\n')}
+                .map(([key, itemConfig]) => {
+                  const color
+                    = itemConfig.theme?.[theme as keyof typeof itemConfig.theme]
+                    ?? itemConfig.color
+                  return color ? `  --color-${key}: ${color};` : null
+                })
+                .join('\n')}
 }
 `,
           )
@@ -213,58 +213,58 @@ function ChartTooltipContent({
               >
                 {formatter && item?.value !== undefined && item.name
                   ? (
-                      formatter(item.value, item.name, item, index, item.payload)
-                    )
+                    formatter(item.value, item.name, item, index, item.payload)
+                  )
                   : (
-                      <>
-                        {itemConfig?.icon
-                          ? (
-                              <itemConfig.icon />
-                            )
-                          : (
-                              !hideIndicator && (
-                                <div
-                                  className={cn(
-                                    'shrink-0 rounded-[2px] border-(--color-border) bg-(--color-bg)',
-                                    {
-                                      'h-2.5 w-2.5': indicator === 'dot',
-                                      'w-1': indicator === 'line',
-                                      'w-0 border-[1.5px] border-dashed bg-transparent':
-                                indicator === 'dashed',
-                                      'my-0.5': nestLabel && indicator === 'dashed',
-                                    },
-                                  )}
-                                  style={
-                                    {
-                                      '--color-bg': indicatorColor,
-                                      '--color-border': indicatorColor,
-                                    } as React.CSSProperties
-                                  }
-                                />
-                              )
-                            )}
-                        <div
-                          className={cn(
-                            'flex flex-1 justify-between leading-none',
-                            nestLabel ? 'items-end' : 'items-center',
-                          )}
-                        >
-                          <div className="grid gap-1.5">
-                            {nestLabel ? tooltipLabel : null}
-                            <span className="text-muted-foreground">
-                              {itemConfig?.label ?? item.name}
-                            </span>
-                          </div>
-                          {item.value != null && (
-                            <span className="font-mono font-medium text-foreground tabular-nums">
-                              {typeof item.value === 'number'
-                                ? item.value.toLocaleString()
-                                : String(item.value)}
-                            </span>
-                          )}
+                    <>
+                      {itemConfig?.icon
+                        ? (
+                          <itemConfig.icon />
+                        )
+                        : (
+                          !hideIndicator && (
+                            <div
+                              className={cn(
+                                'shrink-0 rounded-[2px] border-(--color-border) bg-(--color-bg)',
+                                {
+                                  'h-2.5 w-2.5': indicator === 'dot',
+                                  'w-1': indicator === 'line',
+                                  'w-0 border-[1.5px] border-dashed bg-transparent':
+                                    indicator === 'dashed',
+                                  'my-0.5': nestLabel && indicator === 'dashed',
+                                },
+                              )}
+                              style={
+                                {
+                                  '--color-bg': indicatorColor,
+                                  '--color-border': indicatorColor,
+                                } as React.CSSProperties
+                              }
+                            />
+                          )
+                        )}
+                      <div
+                        className={cn(
+                          'flex flex-1 justify-between leading-none',
+                          nestLabel ? 'items-end' : 'items-center',
+                        )}
+                      >
+                        <div className="grid gap-1.5">
+                          {nestLabel ? tooltipLabel : null}
+                          <span className="text-muted-foreground">
+                            {itemConfig?.label ?? item.name}
+                          </span>
                         </div>
-                      </>
-                    )}
+                        {item.value != null && (
+                          <span className="font-mono font-medium text-foreground tabular-nums">
+                            {typeof item.value === 'number'
+                              ? item.value.toLocaleString()
+                              : String(item.value)}
+                          </span>
+                        )}
+                      </div>
+                    </>
+                  )}
               </div>
             )
           })}
@@ -314,16 +314,16 @@ function ChartLegendContent({
             >
               {itemConfig?.icon && !hideIcon
                 ? (
-                    <itemConfig.icon />
-                  )
+                  <itemConfig.icon />
+                )
                 : (
-                    <div
-                      className="h-2 w-2 shrink-0 rounded-[2px]"
-                      style={{
-                        backgroundColor: item.color,
-                      }}
-                    />
-                  )}
+                  <div
+                    className="h-2 w-2 shrink-0 rounded-[2px]"
+                    style={{
+                      backgroundColor: item.color,
+                    }}
+                  />
+                )}
               {itemConfig?.label}
             </div>
           )

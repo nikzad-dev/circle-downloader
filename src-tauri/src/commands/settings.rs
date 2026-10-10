@@ -1,5 +1,5 @@
-use crate::domain::{Settings, UpdateSettingsRequest};
 use crate::AppState;
+use crate::domain::{Settings, UpdateSettingsRequest};
 use tauri::State;
 
 fn map_err(err: crate::domain::AppError) -> String {

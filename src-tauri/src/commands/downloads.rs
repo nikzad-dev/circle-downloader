@@ -1,10 +1,10 @@
+use crate::AppState;
 use crate::application::DownloadManager;
 use crate::domain::{
     CreateDownloadRequest, DownloadTask, ProgressEvent, RemoveDownloadRequest, RemoveDownloadResult,
 };
-use crate::AppState;
-use tauri::ipc::Channel;
 use tauri::State;
+use tauri::ipc::Channel;
 
 fn map_err(err: crate::domain::AppError) -> String {
     err.into()
@@ -60,13 +60,17 @@ pub fn remove_download(
 pub fn subscribe_progress(
     state: State<'_, AppState>,
     on_event: Channel<ProgressEvent>,
-) -> Result<(), String> {
-    state.manager.progress_hub().subscribe(on_event);
-    Ok(())
+) -> Result<u32, String> {
+    Ok(state.manager.progress_hub().subscribe(on_event))
 }
 
 /// Test helper re-export surface — not a command.
 #[allow(dead_code)]
 pub fn manager_from_state(state: &AppState) -> &DownloadManager {
     &state.manager
+}
+
+#[tauri::command]
+pub fn unsubscribe_progress(state: State<'_, AppState>, subscription_id: u32) {
+    state.manager.progress_hub().unsubscribe(subscription_id);
 }

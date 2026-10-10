@@ -119,22 +119,6 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
-@layer components {
-  [data-chart] .recharts-cartesian-grid line[stroke='#ccc'] {
-    stroke: color-mix(in oklab, var(--border) 50%, transparent);
-  }
-
-  [data-chart] .recharts-dot[stroke='#fff'],
-  [data-chart] .recharts-sector[stroke='#fff'] {
-    stroke: transparent;
-  }
-
-  [data-chart] .recharts-polar-grid [stroke='#ccc'],
-  [data-chart] .recharts-reference-line [stroke='#ccc'] {
-    stroke: var(--border);
-  }
-}
-
 @layer base {
   * {
     @apply border-border outline-ring/50;
@@ -149,5 +133,30 @@
   }
   html {
     @apply font-sans;
+  }
+}
+
+.recharts-cartesian-grid line[stroke='#ccc'],
+.recharts-polar-grid [stroke='#ccc'],
+.recharts-reference-line [stroke='#ccc'] {
+  stroke: var(--border);
+}
+
+.recharts-cartesian-grid line[stroke='#ccc'] {
+  stroke: color-mix(in oklab, var(--border) 50%, transparent);
+}
+
+.recharts-dot[stroke='#fff'],
+.recharts-sector[stroke='#fff'] {
+  stroke: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
   }
 }

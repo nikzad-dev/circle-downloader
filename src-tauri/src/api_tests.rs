@@ -242,8 +242,7 @@ async fn pause_resume_retry_remove() {
         })
         .unwrap();
 
-    let paused = mgr.pause(&task.id).unwrap();
-    assert_eq!(paused.status, DownloadStatus::Paused);
+    assert_eq!(task.status, DownloadStatus::Paused);
 
     let _ = mgr.remove(RemoveDownloadRequest {
         id: task.id,
@@ -319,7 +318,7 @@ async fn range_200_does_not_corrupt_partial() {
 
     let temp = task.temp_path.clone().unwrap();
     std::fs::write(&temp, b"PART").unwrap();
-    let _ = mgr.pause(&task.id).unwrap();
+    assert_eq!(task.status, DownloadStatus::Paused);
     let _ = mgr.resume(&task.id).unwrap();
     wait_for_status(
         &mgr,
@@ -401,4 +400,72 @@ async fn settings_and_queues_apis() {
 #[test]
 fn health_check_unit() {
     assert_eq!(crate::commands::system::health_check(), "ok");
+}
+
+#[tokio::test]
+async fn deferred_download_is_paused_and_resumable() {
+    let base = spawn_fixture_server(|_| (200, b"RESUMED".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/later.bin"),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+        })
+        .unwrap();
+    assert_eq!(task.status, DownloadStatus::Paused);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(mgr.get(&task.id).unwrap().downloaded_bytes, 0);
+    mgr.resume(&task.id).unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(5),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn auto_start_off_saves_paused_even_when_requested() {
+    let (_dir, mgr) = manager();
+    mgr.update_settings(UpdateSettingsRequest {
+        auto_start: Some(false),
+        ..Default::default()
+    })
+    .unwrap();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/later.bin".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: true,
+            request_id: None,
+        })
+        .unwrap();
+    assert_eq!(task.status, DownloadStatus::Paused);
+}
+
+#[test]
+fn native_sync_command_can_start_worker_without_tokio_context() {
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "http://127.0.0.1:1/native.bin".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: true,
+            request_id: None,
+        })
+        .unwrap();
+    let start = std::time::Instant::now();
+    loop {
+        if mgr.get(&task.id).unwrap().status == DownloadStatus::Failed {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(5), "worker never ran");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }

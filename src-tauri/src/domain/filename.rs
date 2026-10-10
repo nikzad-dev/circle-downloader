@@ -74,10 +74,7 @@ mod tests {
 
     #[test]
     fn strips_path_components() {
-        assert_eq!(
-            sanitize_filename("../evil/../../passwd").unwrap(),
-            "passwd"
-        );
+        assert_eq!(sanitize_filename("../evil/../../passwd").unwrap(), "passwd");
     }
 
     #[test]
