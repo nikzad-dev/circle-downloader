@@ -1,7 +1,7 @@
 {
   "task": {
     "id": "contract-task",
-    "url": "https://example.com/contract.bin",
+    "url": "https://example.com/",
     "fileName": "contract.bin",
     "destinationId": "default",
     "status": "failed",

@@ -141,6 +141,7 @@ fn serialize_redacted_url<S: serde::Serializer>(
     let mut url = url::Url::parse(raw).map_err(serde::ser::Error::custom)?;
     let _ = url.set_username("");
     let _ = url.set_password(None);
+    url.set_path("/");
     url.set_query(None);
     url.set_fragment(None);
     serializer.serialize_str(url.as_str())

@@ -59,7 +59,7 @@ pub fn address_allowed(ip: IpAddr, fixtures: bool) -> bool {
                 || (a == 100 && (64..=127).contains(&b))
                 || (a == 169 && b == 254)
                 || (a == 172 && (16..=31).contains(&b))
-                || (a == 192 && (b == 168 || b == 0 || b == 88 && c == 99))
+                || (a == 192 && (b == 168 || b == 0 && matches!(c, 0 | 2) || b == 88 && c == 99))
                 || (a == 198 && (b == 18 || b == 19 || b == 51 && c == 100))
                 || (a == 203 && b == 0 && c == 113))
         }
@@ -67,8 +67,7 @@ pub fn address_allowed(ip: IpAddr, fixtures: bool) -> bool {
             let s = ip.segments();
             (s[0] & 0xe000) == 0x2000
                 && !(s[0] == 0x2001 && (s[1] < 0x0200 || s[1] == 0x0db8))
-                && s[0] != 0x2002
-                && s[0] != 0x3fff
+                && !matches!(s[0], 0x2002 | 0x3ffe | 0x3fff)
         }
     }
 }
@@ -118,12 +117,14 @@ mod tests {
             "2001:db8::1",
             "2002:7f00:1::",
             "3fff::1",
+            "3ffe::1",
         ] {
             assert!(!address_allowed(ip.parse().unwrap(), false), "{ip}");
         }
         for ip in [
             "1.1.1.1",
             "8.8.8.8",
+            "192.0.10.1",
             "2606:4700:4700::1111",
             "2001:4860:4860::8888",
         ] {

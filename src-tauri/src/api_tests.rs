@@ -1076,8 +1076,8 @@ fn ipc_serialization_redacts_legacy_credentials_and_signed_queries() {
             expected_sha256: None,
         })
         .unwrap();
-    task.url = "https://legacy-user:private-password@example.com/file?signature=private-query#private-fragment".into();
+    task.url = "https://legacy-user:private-password@example.com/private-signed-path/file?signature=private-query#private-fragment".into();
     let serialized = serde_json::to_value(task).unwrap();
-    assert_eq!(serialized["url"], "https://example.com/file");
+    assert_eq!(serialized["url"], "https://example.com/");
     assert!(!serialized.to_string().contains("private"));
 }

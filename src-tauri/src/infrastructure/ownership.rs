@@ -32,3 +32,25 @@ impl DataDirectoryLease {
         Ok(Self { _file: file })
     }
 }
+
+impl Drop for DataDirectoryLease {
+    fn drop(&mut self) {
+        // End logical ownership even if a subprocess briefly inherited the open description
+        // before exec. Process termination still releases the lock through the OS.
+        let _ = self._file.unlock();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn dropping_owner_unlocks_even_while_a_duplicate_file_description_exists() {
+        let dir = tempfile::tempdir().unwrap();
+        let lease = DataDirectoryLease::acquire(dir.path()).unwrap();
+        let duplicate = lease._file.try_clone().unwrap();
+        drop(lease);
+        let _new_owner = DataDirectoryLease::acquire(dir.path()).unwrap();
+        drop(duplicate);
+    }
+}
