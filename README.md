@@ -17,7 +17,7 @@ The app uses a single connection per transfer. Folder selection, search/filter/s
 
 ## Development setup
 
-Install Bun, Rust 1.91.0 with Cargo, rustfmt and Clippy (pinned by `rust-toolchain.toml`), and Node.js compatible with Vite 8 (20.19+ or 22.12+ within its supported version ranges). Native development also needs the [Tauri 2 prerequisites for your operating system](https://v2.tauri.app/start/prerequisites/): Xcode Command Line Tools for desktop macOS, the required WebKitGTK/build packages on Linux, or Microsoft C++ Build Tools and WebView2 on Windows.
+Install Bun, Rust 1.91.0 with Cargo, rustfmt, Clippy, rust-analyzer and rust-src (pinned by `rust-toolchain.toml`), and Node.js compatible with Vite 8 (20.19+ or 22.12+ within its supported version ranges). Native development also needs the [Tauri 2 prerequisites for your operating system](https://v2.tauri.app/start/prerequisites/): Xcode Command Line Tools for desktop macOS, the required WebKitGTK/build packages on Linux, or Microsoft C++ Build Tools and WebView2 on Windows.
 
 From the repository root:
 
