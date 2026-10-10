@@ -119,6 +119,22 @@
   --sidebar-ring: oklch(0.556 0 0);
 }
 
+@layer components {
+  [data-chart] .recharts-cartesian-grid line[stroke='#ccc'] {
+    stroke: color-mix(in oklab, var(--border) 50%, transparent);
+  }
+
+  [data-chart] .recharts-dot[stroke='#fff'],
+  [data-chart] .recharts-sector[stroke='#fff'] {
+    stroke: transparent;
+  }
+
+  [data-chart] .recharts-polar-grid [stroke='#ccc'],
+  [data-chart] .recharts-reference-line [stroke='#ccc'] {
+    stroke: var(--border);
+  }
+}
+
 @layer base {
   * {
     @apply border-border outline-ring/50;
