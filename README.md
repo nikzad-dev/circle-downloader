@@ -6,6 +6,7 @@ A local desktop download manager built with Tauri, Rust, React and shadcn/ui. Ru
 
 ## Current features
 
+- Compact shadcn File/View/Help menubar with top navigation, keyboard controls and Light/Dark/System appearance; no sidebar.
 - Home overview with real transfer counts, recent downloads and failures.
 - Add Download with URL validation, optional filename, approved destination and Start now.
 - Downloads table with search/filter/sort, bulk actions, progress, bytes, speed and task actions.
