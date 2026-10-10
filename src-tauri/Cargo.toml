@@ -57,6 +57,8 @@ dirs = "6"
 cap-std = "4"
 cap-fs-ext = "4"
 same-file = "1"
+open = "5"
+tauri-plugin-dialog = "2"
 
 [dev-dependencies]
 tempfile = "3"

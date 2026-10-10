@@ -3,8 +3,10 @@ import { z } from 'zod'
 import { nativeCommands } from '../tauri/commands'
 import {
   createDownloadInputSchema,
+  destinationSchema,
   downloadIdInputSchema,
   downloadTaskSchema,
+  grantDestinationInputSchema,
   queueSchema,
   removeDownloadInputSchema,
   removeDownloadResultSchema,
@@ -48,6 +50,12 @@ export const appRouter = {
       .input(downloadIdInputSchema)
       .output(downloadTaskSchema)
       .handler(async ({ input }) => nativeCommands.retryDownload(input)),
+    open: os
+      .input(downloadIdInputSchema)
+      .handler(async ({ input }) => nativeCommands.openDownload(input)),
+    reveal: os
+      .input(downloadIdInputSchema)
+      .handler(async ({ input }) => nativeCommands.revealDownload(input)),
   },
   settings: {
     get: os.output(settingsSchema).handler(async () => nativeCommands.getSettings()),
@@ -58,5 +66,15 @@ export const appRouter = {
   },
   queues: {
     list: os.output(z.array(queueSchema)).handler(async () => nativeCommands.listQueues()),
+  },
+  destinations: {
+    list: os.output(z.array(destinationSchema)).handler(async () => nativeCommands.listDestinations()),
+    grant: os
+      .input(grantDestinationInputSchema)
+      .output(destinationSchema)
+      .handler(async ({ input }) => nativeCommands.grantDestination(input)),
+    remove: os
+      .input(downloadIdInputSchema)
+      .handler(async ({ input }) => nativeCommands.removeDestination(input)),
   },
 }

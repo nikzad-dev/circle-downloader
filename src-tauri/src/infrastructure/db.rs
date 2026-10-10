@@ -8,12 +8,16 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SCHEMA_VERSION: i64 = 3;
+const SCHEMA_VERSION: i64 = 4;
 const BUSY_TIMEOUT_MS: i32 = 5000;
 
 type MigrationStep = fn(&rusqlite::Transaction<'_>) -> Result<(), AppError>;
 
-const MIGRATIONS: &[(i64, MigrationStep)] = &[(2, migrate_v2_checksums), (3, migrate_v3_queue)];
+const MIGRATIONS: &[(i64, MigrationStep)] = &[
+    (2, migrate_v2_checksums),
+    (3, migrate_v3_queue),
+    (4, migrate_v4_destinations),
+];
 
 #[derive(Clone)]
 pub struct Database {
@@ -396,6 +400,94 @@ impl Database {
         Ok(current)
     }
 
+    pub fn list_destinations(&self) -> Result<Vec<(String, String, String)>, AppError> {
+        let conn = self.conn.lock();
+        let mut stmt = conn
+            .prepare("SELECT id, label, root_path FROM destinations ORDER BY created_at ASC")
+            .map_err(map_db_err)?;
+        let rows = stmt
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(map_db_err)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(map_db_err)?;
+        Ok(rows)
+    }
+
+    pub fn insert_destination(
+        &self,
+        id: &str,
+        label: &str,
+        root_path: &str,
+        created_at: &str,
+    ) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        conn.execute(
+            "INSERT INTO destinations (id, label, root_path, created_at) VALUES (?1,?2,?3,?4)",
+            params![id, label, root_path, created_at],
+        )
+        .map_err(map_db_err)?;
+        Ok(())
+    }
+
+    pub fn get_destination_path(&self, id: &str) -> Result<Option<String>, AppError> {
+        let conn = self.conn.lock();
+        conn.query_row(
+            "SELECT root_path FROM destinations WHERE id = ?1",
+            params![id],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(map_db_err)
+    }
+
+    pub fn remove_destination(&self, id: &str) -> Result<(), AppError> {
+        let conn = self.conn.lock();
+        let in_use: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM downloads WHERE destination_id = ?1
+                 AND status NOT IN ('completed','canceled')",
+                params![id],
+                |row| row.get(0),
+            )
+            .map_err(map_db_err)?;
+        if in_use > 0 {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "This folder is still used by active downloads. Finish or remove them first.",
+            ));
+        }
+        let settings = self.get_settings()?;
+        if settings.default_destination_id == id {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Choose another default destination before removing this folder.",
+            ));
+        }
+        let changed = conn
+            .execute("DELETE FROM destinations WHERE id = ?1", params![id])
+            .map_err(map_db_err)?;
+        if changed == 0 {
+            return Err(AppError::new(
+                ErrorCode::TaskNotFound,
+                format!("Destination not found: {id}"),
+            ));
+        }
+        Ok(())
+    }
+
+    pub fn destination_exists(&self, id: &str) -> Result<bool, AppError> {
+        if id == "default" {
+            return Ok(true);
+        }
+        Ok(self.get_destination_path(id)?.is_some())
+    }
+
     pub fn list_queues(&self) -> Result<Vec<Queue>, AppError> {
         let conn = self.conn.lock();
         let mut stmt = conn
@@ -484,6 +576,18 @@ fn migrate_v3_queue(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
          ALTER TABLE downloads ADD COLUMN next_retry_at TEXT;
          CREATE INDEX IF NOT EXISTS idx_downloads_queue_order
            ON downloads(queue_id, queue_position);",
+    )
+    .map_err(map_db_err)
+}
+
+fn migrate_v4_destinations(tx: &rusqlite::Transaction<'_>) -> Result<(), AppError> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS destinations (
+           id TEXT PRIMARY KEY,
+           label TEXT NOT NULL,
+           root_path TEXT NOT NULL UNIQUE,
+           created_at TEXT NOT NULL
+         );",
     )
     .map_err(map_db_err)
 }
@@ -696,7 +800,7 @@ mod migration_tests {
         drop(db);
         for _ in 0..2 {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 3);
+            assert_eq!(db.schema_version().unwrap(), 4);
             let task = db.get_download("legacy").unwrap();
             assert_eq!(task.file_name, "file");
             assert!(task.actual_sha256.is_none());

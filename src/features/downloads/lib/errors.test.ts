@@ -6,7 +6,7 @@ describe('actionable transfer failures', () => {
   it.each([
     ['TLS_ERROR', 'secure connection'],
     ['NETWORK_CONNECTION', 'download host'],
-    ['NETWORK_INTERRUPTED', 'before the download finished'],
+    ['NETWORK_INTERRUPTED', 'Retry to resume safely'],
     ['HTTP_NOT_FOUND', 'new download link'],
     ['HTTP_CLIENT_ERROR', 'server rejected'],
     ['HTTP_SERVER_ERROR', 'retry'],

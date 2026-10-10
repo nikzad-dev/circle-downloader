@@ -1,6 +1,6 @@
 import type { DownloadTask } from '@/lib/orpc/schemas'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
-import { Pause, Play, RotateCcw, Trash2, X } from 'lucide-react'
+import { ExternalLink, FolderOpen, Pause, Play, RotateCcw, Trash2, X } from 'lucide-react'
 import { useRef, useState } from 'react'
 import { AlertDialog, AlertDialogClose, AlertDialogContent, AlertDialogDescription, AlertDialogTitle } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
@@ -48,9 +48,27 @@ export function TaskActions({ task }: { task: DownloadTask }) {
     }
   }
   const allowed = taskActions(task.status)
+  const openOrReveal = async (kind: 'open' | 'reveal') => {
+    try {
+      await orpc.downloads[kind].call({ id: task.id })
+    }
+    catch (error) {
+      toast.add({ title: kind === 'open' ? 'Could not open file' : 'Could not reveal folder', description: downloadErrorMessage(error), type: 'error' })
+    }
+  }
   return (
     <div className="flex items-center justify-end gap-1" aria-label={`Actions for ${task.fileName}`}>
       {([['pause', Pause, 'Pause'], ['resume', Play, 'Resume'], ['retry', RotateCcw, 'Retry'], ['cancel', X, 'Cancel']] as const).map(([action, Icon, label]) => allowed[action] && <Button key={action} variant="ghost" size="icon-sm" title={label} aria-label={`${label} ${task.fileName}`} disabled={mutation.isPending} onClick={() => void act(action)}><Icon aria-hidden="true" /></Button>)}
+      {task.status === 'completed' && (
+        <Button variant="ghost" size="icon-sm" title="Open file" aria-label={`Open ${task.fileName}`} onClick={() => void openOrReveal('open')}>
+          <ExternalLink aria-hidden="true" />
+        </Button>
+      )}
+      {['completed', 'failed', 'paused', 'canceled'].includes(task.status) && (
+        <Button variant="ghost" size="icon-sm" title="Reveal folder" aria-label={`Reveal folder for ${task.fileName}`} onClick={() => void openOrReveal('reveal')}>
+          <FolderOpen aria-hidden="true" />
+        </Button>
+      )}
       <Button
         ref={triggerRef}
         variant="ghost"

@@ -1341,3 +1341,127 @@ async fn honor_retry_after_when_present() {
         Some(3600)
     );
 }
+
+#[tokio::test]
+async fn destination_grants_resolve_and_reject_unknown_ids() {
+    use crate::domain::GrantDestinationRequest;
+    let dir = tempdir().unwrap();
+    let granted = dir.path().join("granted");
+    std::fs::create_dir_all(&granted).unwrap();
+    let (_data, mgr) = manager();
+    let destinations = mgr.list_destinations().unwrap();
+    assert!(
+        destinations
+            .iter()
+            .any(|item| item.id == "default" && item.is_default)
+    );
+    let granted_item = mgr
+        .grant_destination(GrantDestinationRequest {
+            path: granted.to_string_lossy().into_owned(),
+            label: Some("Granted".into()),
+        })
+        .unwrap();
+    assert_eq!(granted_item.label, "Granted");
+    assert!(!granted_item.is_default);
+    mgr.update_settings(UpdateSettingsRequest {
+        default_destination_id: Some(granted_item.id.clone()),
+        ..Default::default()
+    })
+    .unwrap();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/into-granted.bin".into(),
+            destination_id: Some(granted_item.id.clone()),
+            suggested_name: Some("into-granted.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    let granted_canonical = std::fs::canonicalize(&granted).unwrap();
+    assert!(
+        task.final_path
+            .as_deref()
+            .is_some_and(|path| path.starts_with(granted_canonical.to_string_lossy().as_ref()))
+    );
+    let err = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/bad.bin".into(),
+            destination_id: Some("missing-destination".into()),
+            suggested_name: Some("bad.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::PathNotAllowed);
+    mgr.remove_destination(&granted_item.id).unwrap_err(); // still default
+    mgr.update_settings(UpdateSettingsRequest {
+        default_destination_id: Some("default".into()),
+        ..Default::default()
+    })
+    .unwrap();
+    // Active paused task still uses the folder.
+    let in_use = mgr.remove_destination(&granted_item.id).unwrap_err();
+    assert_eq!(in_use.code, ErrorCode::PathNotAllowed);
+}
+
+#[tokio::test]
+async fn open_and_reveal_validate_paths_under_destination() {
+    let (data, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/open-me.bin".into(),
+            destination_id: None,
+            suggested_name: Some("open-me.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    let final_path = task
+        .final_path
+        .clone()
+        .expect("create reserves a final path");
+    let missing = mgr.open_download(&task.id).unwrap_err();
+    assert_eq!(missing.code, ErrorCode::StorageNotFound);
+
+    std::fs::write(&final_path, b"ok").unwrap();
+    mgr.open_download(&task.id).unwrap();
+    mgr.reveal_download(&task.id).unwrap();
+
+    let db = Database::open(data.path().join("test.db")).unwrap();
+    let mut poisoned = db.get_download(&task.id).unwrap();
+    poisoned.final_path = Some(data.path().join("outside.bin").to_string_lossy().into());
+    db.upsert_download(&poisoned).unwrap();
+    let outside = mgr.open_download(&task.id).unwrap_err();
+    assert_eq!(outside.code, ErrorCode::PathNotAllowed);
+}
+
+#[tokio::test]
+async fn settings_reject_unknown_destination_and_out_of_range_concurrency() {
+    let (_data, mgr) = manager();
+    let bad_dest = mgr
+        .update_settings(UpdateSettingsRequest {
+            default_destination_id: Some("missing".into()),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(bad_dest.code, ErrorCode::PathNotAllowed);
+    let bad_concurrency = mgr
+        .update_settings(UpdateSettingsRequest {
+            max_concurrent_downloads: Some(99),
+            ..Default::default()
+        })
+        .unwrap_err();
+    assert_eq!(bad_concurrency.code, ErrorCode::Internal);
+    let ok = mgr
+        .update_settings(UpdateSettingsRequest {
+            max_concurrent_downloads: Some(8),
+            auto_start: Some(false),
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(ok.max_concurrent_downloads, 8);
+    assert!(!ok.auto_start);
+}

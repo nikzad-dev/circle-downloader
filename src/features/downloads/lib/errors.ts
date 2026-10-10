@@ -19,7 +19,7 @@ const messages: Record<ErrorCode, string> = {
   INVALID_TRANSITION: 'The download changed while you were acting. Check its current status.',
   DATA_DIRECTORY_IN_USE: 'Another Circle process is using this data folder. Close it before reopening the app.',
   NETWORK_CONNECTION: 'Could not reach the server. Check your connection and the download host, then retry.',
-  NETWORK_INTERRUPTED: 'The connection ended before the download finished. Check your connection and retry.',
+  NETWORK_INTERRUPTED: 'The transfer was interrupted. Retry to resume safely when validators still match, or add a fresh download when resume is unsafe.',
   TLS_ERROR: 'The secure connection could not be verified. Check your system clock or contact the site owner.',
   HTTP_NOT_FOUND: 'The file is no longer available. Get a new download link.',
   HTTP_CLIENT_ERROR: 'The server rejected this request. Check the link or obtain a new one.',

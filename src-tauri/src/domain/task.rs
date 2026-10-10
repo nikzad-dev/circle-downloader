@@ -122,6 +122,23 @@ pub struct Queue {
     pub task_count: u32,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct Destination {
+    pub id: String,
+    pub label: String,
+    /// Redacted display path; never includes secrets.
+    pub display_path: String,
+    pub is_default: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GrantDestinationRequest {
+    pub path: String,
+    pub label: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RemoveDownloadRequest {

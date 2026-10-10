@@ -7,15 +7,19 @@ A local desktop download manager built with Tauri, Rust, React and shadcn/ui. Ru
 ## Current features
 
 - Home overview with real transfer counts, recent downloads and failures.
-- Add Download with URL validation, optional filename and Start now.
-- Downloads table with progress, transferred bytes, speed and task-specific actions.
-- Pause, resume, cancel, manual retry and removal confirmation.
-- SQLite task/settings persistence, exclusive process ownership and verified publication recovery.
+- Add Download with URL validation, optional filename, approved destination and Start now.
+- Downloads table with search/filter/sort, bulk actions, progress, bytes, speed and task actions.
+- Task details Sheet via `/downloads/$downloadId` (redacted source, retries, verification).
+- Pause, resume, cancel, manual retry, Open/Reveal and removal confirmation.
+- Native folder grants (opaque IDs) plus the always-available app-managed default folder.
+- Settings: appearance, auto-start, concurrency, default destination; retries/host caps are read-only.
+- Global shortcuts: ⌘/Ctrl+N Add download; ⌘/Ctrl+V pastes a URL into Add when focus is not in an editable field.
+- SQLite task/settings/destination persistence, exclusive process ownership and verified publication recovery.
 - Retained SHA-256 digests with optional expected-checksum comparison.
 - Rust-enforced public HTTPS, safe redirect/DNS policy and anchored no-follow file operations.
 - Light, Dark and System appearance using the existing neutral/lime shadcn theme.
 
-The app uses a single connection per transfer. Folder selection, search/filter/sort, bulk actions, task details, automatic retries, segmentation and browser integration are planned.
+The app uses a single connection per transfer. Segmentation, browser integration and full cross-platform release QA remain planned.
 
 ## Development setup
 
@@ -51,13 +55,13 @@ Reuse that directory to test persistence across restarts. On Windows, set the sa
 
 ## Using the app
 
-1. Open **Add download** from the toolbar or Home.
+1. Open **Add download** from the toolbar, Home, or ⌘/Ctrl+N (⌘/Ctrl+V pastes a clipboard URL when focus is not in an input).
 2. Paste a direct public HTTPS file URL without embedded credentials or fragments. Private/special-use addresses, unsafe redirects and remote plain HTTP are rejected. Debug builds additionally accept loopback fixture links; release builds do not enable HTTP/LAN access.
-3. Optionally set a filename and a trusted 64-character SHA-256 checksum. Circle compares the complete file with that checksum before publishing; without one it reports a calculated digest rather than verified integrity. Leave **Start now** selected to begin, or clear it to save the task as Paused and choose **Resume** later. A disabled backend auto-start setting also saves it paused.
-4. Follow progress in **Downloads**. Available controls depend on the current task status. Failed tasks offer manual **Retry**.
+3. Optionally set a filename, choose an approved destination folder and a trusted 64-character SHA-256 checksum. Circle compares the complete file with that checksum before publishing; without one it reports a calculated digest rather than verified integrity. Leave **Start now** selected to begin, or clear it to save the task as Paused and choose **Resume** later. A disabled backend auto-start setting also saves it paused.
+4. Follow progress in **Downloads**. Use search, status and sort controls; select rows for bulk Pause/Resume/Retry/Cancel/Remove. Open a row (or deep-link `/downloads/$id`) for details. Failed tasks offer manual **Retry**. Completed tasks offer **Open** and **Reveal**.
 5. Choose **Remove** to remove a record. The confirmation offers partial-file deletion for unfinished tasks, enabled by default. Completed files remain on disk.
 
-Appearance is available in the sidebar and Settings. System is the initial default; your selection is saved. Transfer preferences and destination selection are not yet editable in Settings.
+Appearance, auto-start, concurrency (1–32) and the default destination are editable in Settings. Approve extra folders there; Circle never replaces an existing file when naming collisions occur. Automatic retries (up to 5) and the per-host limit (2) are shown read-only.
 
 ### Where files and history live
 
@@ -91,7 +95,7 @@ bun run clippy:rust
 
 `build` runs TypeScript and creates the production frontend. `test` runs Vitest's Node and jsdom projects; `test:rust` runs native tests, including controlled localhost HTTP fixtures and temporary files. The Unix TLS test fixture also needs the `openssl` command to generate a temporary self-signed certificate; production TLS uses Rustls and does not need that command. Restricted sandboxes must permit fixture socket binding and subprocess execution. Use `bun run test`, not `bun test`, for this suite. `bun run test:watch` enables frontend watch mode.
 
-The 2026-10-11 local checks passed **81 frontend tests in 16 files** and **74 Rust tests**, plus typecheck, lint, production build, formatting, strict Clippy and the macOS debug app build. One ignored Rust test is a subprocess fixture explicitly invoked by the process-ownership tests. The built native app also passed duplicate-process rejection and restart ownership checks in an isolated data root. See the [ownership/error verification](docs/verification/N1_OWNERSHIP_ERRORS_2026-10-11.md) and [checksum/recovery/security verification](docs/verification/N1_CHECKSUM_RECOVERY_SECURITY_2026-10-11.md). Full accessibility and Windows/Linux release QA remain pending.
+The 2026-10-11 N3 local checks passed frontend Vitest suites and **89 Rust lib tests**, plus typecheck, formatting and strict Clippy. One ignored Rust test is a subprocess fixture explicitly invoked by the process-ownership tests. See the [N3 everyday UI verification](docs/verification/N3_EVERYDAY_UI_2026-10-11.md), [N2 durable queue verification](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md), [ownership/error verification](docs/verification/N1_OWNERSHIP_ERRORS_2026-10-11.md) and [checksum/recovery/security verification](docs/verification/N1_CHECKSUM_RECOVERY_SECURITY_2026-10-11.md). Full accessibility and Windows/Linux release QA remain pending.
 
 ### Native builds
 
@@ -137,10 +141,12 @@ Environment/system proxy use is disabled so the native address checks cannot be 
 
 HTTP, TLS, connection and storage failures have structured codes and actionable UI messages without exposing signed URLs or internal paths. Certificate failures require correcting the clock or server TLS configuration; certificate validation remains enabled. Transient connection/server/storage failures are marked retryable and auto-scheduled up to five attempts with exponential backoff/jitter (and Retry-After when present); permanent failures are not auto-retried. Scheduled retries expose `retryCount` and `nextRetryAt`.
 
-Configured concurrency is enforced globally (settings 1–32) with a per-host fairness cap of two. Queue membership and order are durable. Publication uses a synced partial and durable ready/cleanup checkpoints; startup verifies recorded digests and reconciles partial/final files. It preserves conflicting files rather than overwriting them. Full-file hashing uses a bounded 64 KiB buffer; digests and expected-checksum results are retained. Startup rehashing can take time with a large history. Windows directory-entry power-loss durability, Windows/Linux tray smoke and cross-platform release checks remain pending. See the [N2 verification record](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md). Remote macOS CI passed for commit `d63fd61`; see the [remote CI verification](docs/verification/REMOTE_CI_2026-10-11.md).
+Configured concurrency is enforced globally (settings 1–32) with a per-host fairness cap of two. Queue membership and order are durable. Approved destination folders are opaque grants resolved only in Rust; writes stay no-follow and never replace an existing final file. Publication uses a synced partial and durable ready/cleanup checkpoints; startup verifies recorded digests and reconciles partial/final files. Full-file hashing uses a bounded 64 KiB buffer; digests and expected-checksum results are retained. Startup rehashing can take time with a large history. Downloads virtualizes at 100+ filtered rows; Home stays capped. Windows directory-entry power-loss durability, Windows/Linux tray smoke and cross-platform release checks remain pending. See the [N3 verification record](docs/verification/N3_EVERYDAY_UI_2026-10-11.md) and [N2 verification record](docs/verification/N2_DURABLE_QUEUE_2026-10-11.md). Remote macOS CI passed for commit `d63fd61`; see the [remote CI verification](docs/verification/REMOTE_CI_2026-10-11.md).
 
 Follow [ROADMAP.md](ROADMAP.md) for the ordered work: quality baseline, transfer correctness, durable scheduling/recovery, everyday UI, advanced features and supported releases. The [archived UI checklist](docs/archive/MVP_UI_ROADMAP_2026-10-10.md) retains implementation and native smoke evidence.
 
 Keep changes focused, preserve the existing shadcn tokens/components, and add tests for meaningful behavior and failure paths. Update the roadmap with actual evidence when a slice is finished. Do not commit runtime databases, downloaded files, credentials or signing keys.
+
+For vulnerability reporting, security boundaries and known limitations, see [SECURITY.md](SECURITY.md). Request a private reporting channel before sharing sensitive vulnerability details.
 
 **License:** this project is licensed under [GPL-3.0-or-later](LICENSE). Dependencies retain their own licenses; see the [dependency inventory](docs/DEPENDENCIES.md) for release review.

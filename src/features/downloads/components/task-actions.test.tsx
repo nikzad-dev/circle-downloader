@@ -26,10 +26,25 @@ describe('task actions', () => {
     await user.click(screen.getByRole('button', { name: `${label} file.zip` }))
     await waitFor(() => expect(invoke).toHaveBeenCalledWith(command, { id: 'task-1' }))
   })
-  it.each(['completed', 'canceled'] as const)('only offers removal for %s', (status) => {
-    setup(status)
-    expect(screen.getAllByRole('button')).toHaveLength(1)
+  it('offers open, reveal, and remove for completed downloads', () => {
+    setup('completed')
+    expect(screen.getByRole('button', { name: 'Open file.zip' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Reveal folder for file.zip' })).toBeEnabled()
     expect(screen.getByRole('button', { name: 'Remove file.zip' })).toBeEnabled()
+    expect(screen.getAllByRole('button')).toHaveLength(3)
+  })
+  it('offers reveal and remove for canceled downloads', () => {
+    setup('canceled')
+    expect(screen.queryByRole('button', { name: 'Open file.zip' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Reveal folder for file.zip' })).toBeEnabled()
+    expect(screen.getByRole('button', { name: 'Remove file.zip' })).toBeEnabled()
+    expect(screen.getAllByRole('button')).toHaveLength(2)
+  })
+  it('opens a completed file through the native command', async () => {
+    invoke.mockResolvedValue(undefined)
+    const { user } = setup('completed')
+    await user.click(screen.getByRole('button', { name: 'Open file.zip' }))
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith('open_download', { id: 'task-1' }))
   })
   it('requires confirmation and honors partial-file retention', async () => {
     invoke.mockResolvedValue({ removed: true })

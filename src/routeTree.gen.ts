@@ -13,6 +13,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as DownloadsRouteImport } from './routes/downloads'
 import { Route as Health_checkRouteImport } from './routes/health_check'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as DownloadsDownloadIdRouteImport } from './routes/downloads.$downloadId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -34,37 +35,61 @@ const SettingsRoute = SettingsRouteImport.update({
   path: '/settings',
   getParentRoute: () => rootRouteImport,
 } as any)
+const DownloadsDownloadIdRoute = DownloadsDownloadIdRouteImport.update({
+  id: '/$downloadId',
+  path: '/$downloadId',
+  getParentRoute: () => DownloadsRoute,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/downloads': typeof DownloadsRoute
+  '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
   '/settings': typeof SettingsRoute
+  '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/downloads': typeof DownloadsRoute
+  '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
   '/settings': typeof SettingsRoute
+  '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/downloads': typeof DownloadsRoute
+  '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
   '/settings': typeof SettingsRoute
+  '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/downloads' | '/health_check' | '/settings'
+  fullPaths:
+    | '/'
+    | '/downloads'
+    | '/health_check'
+    | '/settings'
+    | '/downloads/$downloadId'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/downloads' | '/health_check' | '/settings'
-  id: '__root__' | '/' | '/downloads' | '/health_check' | '/settings'
+  to:
+    | '/'
+    | '/downloads'
+    | '/health_check'
+    | '/settings'
+    | '/downloads/$downloadId'
+  id:
+    | '__root__'
+    | '/'
+    | '/downloads'
+    | '/health_check'
+    | '/settings'
+    | '/downloads/$downloadId'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  DownloadsRoute: typeof DownloadsRoute
+  DownloadsRoute: typeof DownloadsRouteWithChildren
   Health_checkRoute: typeof Health_checkRoute
   SettingsRoute: typeof SettingsRoute
 }
@@ -99,12 +124,31 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SettingsRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/downloads/$downloadId': {
+      id: '/downloads/$downloadId'
+      path: '/$downloadId'
+      fullPath: '/downloads/$downloadId'
+      preLoaderRoute: typeof DownloadsDownloadIdRouteImport
+      parentRoute: typeof DownloadsRoute
+    }
   }
 }
 
+interface DownloadsRouteChildren {
+  DownloadsDownloadIdRoute: typeof DownloadsDownloadIdRoute
+}
+
+const DownloadsRouteChildren: DownloadsRouteChildren = {
+  DownloadsDownloadIdRoute: DownloadsDownloadIdRoute,
+}
+
+const DownloadsRouteWithChildren = DownloadsRoute._addFileChildren(
+  DownloadsRouteChildren,
+)
+
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  DownloadsRoute: DownloadsRoute,
+  DownloadsRoute: DownloadsRouteWithChildren,
   Health_checkRoute: Health_checkRoute,
   SettingsRoute: SettingsRoute,
 }

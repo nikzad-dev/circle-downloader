@@ -2,8 +2,10 @@ import type { CreateDownloadInput, Settings } from '../orpc/schemas'
 import { invoke } from '@tauri-apps/api/core'
 import {
   createDownloadInputSchema,
+  destinationSchema,
   downloadIdInputSchema,
   downloadTaskSchema,
+  grantDestinationInputSchema,
   queueSchema,
   removeDownloadInputSchema,
   removeDownloadResultSchema,
@@ -106,5 +108,31 @@ export const nativeCommands = {
   listQueues: async () => {
     const result = await invokeCommand<unknown>('list_queues')
     return queueSchema.array().parse(result)
+  },
+
+  listDestinations: async () => {
+    const result = await invokeCommand<unknown>('list_destinations')
+    return destinationSchema.array().parse(result)
+  },
+
+  grantDestination: async (input: { path: string, label?: string }) => {
+    const parsed = grantDestinationInputSchema.parse(input)
+    const result = await invokeCommand<unknown>('grant_destination', { input: parsed })
+    return destinationSchema.parse(result)
+  },
+
+  removeDestination: async (input: { id: string }) => {
+    const parsed = downloadIdInputSchema.parse(input)
+    await invokeCommand<unknown>('remove_destination', parsed)
+  },
+
+  openDownload: async (input: { id: string }) => {
+    const parsed = downloadIdInputSchema.parse(input)
+    await invokeCommand<unknown>('open_download', parsed)
+  },
+
+  revealDownload: async (input: { id: string }) => {
+    const parsed = downloadIdInputSchema.parse(input)
+    await invokeCommand<unknown>('reveal_download', parsed)
   },
 }

@@ -3,8 +3,9 @@ use crate::domain::filename::{filename_from_url, sanitize_filename};
 use crate::domain::transitions::ensure_transition;
 use crate::domain::url_policy::validate_download_url;
 use crate::domain::{
-    AppError, CreateDownloadRequest, DownloadStatus, DownloadTask, ErrorCode, ProgressEvent, Queue,
-    RemoveDownloadRequest, RemoveDownloadResult, Settings, TaskError, UpdateSettingsRequest,
+    AppError, CreateDownloadRequest, Destination, DownloadStatus, DownloadTask, ErrorCode,
+    GrantDestinationRequest, ProgressEvent, Queue, RemoveDownloadRequest, RemoveDownloadResult,
+    Settings, TaskError, UpdateSettingsRequest,
 };
 use crate::infrastructure::db::{Database, is_unique_constraint};
 use crate::infrastructure::files::ManagedFiles;
@@ -35,6 +36,7 @@ struct ManagerInner {
     db: Database,
     _data_dir_lease: DataDirectoryLease,
     download_dir: PathBuf,
+    #[allow(dead_code)]
     files: ManagedFiles,
     http: Client,
     progress: ProgressHub,
@@ -128,12 +130,8 @@ impl DownloadManager {
         let destination_id = req
             .destination_id
             .unwrap_or(settings.default_destination_id);
-        if destination_id != "default" {
-            return Err(AppError::new(
-                ErrorCode::PathNotAllowed,
-                "Only the app-managed download folder is approved.",
-            ));
-        }
+        let dest_root = resolve_root(&self.inner, &destination_id)?;
+        let _files = ManagedFiles::new(&dest_root)?;
         let file_name = match req.suggested_name {
             Some(name) => sanitize_filename(&name)?,
             None => filename_from_url(url.as_str()),
@@ -141,14 +139,12 @@ impl DownloadManager {
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
-        let temp_path = self
-            .inner
-            .download_dir
+        let temp_path = dest_root
             .join(format!(".{id}.{file_name}.part"))
             .to_string_lossy()
             .to_string();
         let reserved = self.inner.db.list_downloads()?;
-        let final_path = unique_final_path(&self.inner.download_dir, &file_name, &reserved)?;
+        let final_path = unique_final_path(&dest_root, &file_name, &reserved)?;
         let file_name = final_path
             .file_name()
             .unwrap()
@@ -234,8 +230,10 @@ impl DownloadManager {
             let mut task = self.inner.db.get_download(id)?;
             ensure_transition(task.status, DownloadStatus::Queued)?;
             if let Some(temp) = &task.temp_path {
-                let name = managed_name(&self.inner, temp)?;
-                task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
+                let root = resolve_root(&self.inner, &task.destination_id)?;
+                let files = ManagedFiles::new(&root)?;
+                let name = managed_name(&root, temp)?;
+                task.downloaded_bytes = files.length(&name)?.unwrap_or(0);
             }
             enqueue_runnable(&self.inner, &mut task)?;
             task.error = None;
@@ -279,8 +277,10 @@ impl DownloadManager {
         let _mutation = self.inner.mutations.lock();
         let mut task = self.inner.db.get_download(id)?;
         if let Some(temp) = &task.temp_path {
-            let name = managed_name(&self.inner, temp)?;
-            task.downloaded_bytes = self.inner.files.length(&name)?.unwrap_or(0);
+            let root = resolve_root(&self.inner, &task.destination_id)?;
+            let files = ManagedFiles::new(&root)?;
+            let name = managed_name(&root, temp)?;
+            task.downloaded_bytes = files.length(&name)?.unwrap_or(0);
             task.bump_revision();
             self.inner.db.upsert_download(&task)?;
             self.emit_progress(&task);
@@ -340,7 +340,9 @@ impl DownloadManager {
         if req.delete_partial
             && let Some(temp) = &task.temp_path
         {
-            self.inner.files.remove(&managed_name(&self.inner, temp)?)?;
+            let root = resolve_root(&self.inner, &task.destination_id)?;
+            let files = ManagedFiles::new(&root)?;
+            files.remove(&managed_name(&root, temp)?)?;
         }
         self.inner.db.remove_download(&req.id)?;
         Ok(RemoveDownloadResult { removed: true })
@@ -351,14 +353,12 @@ impl DownloadManager {
     }
 
     pub fn update_settings(&self, patch: UpdateSettingsRequest) -> Result<Settings, AppError> {
-        if patch
-            .default_destination_id
-            .as_deref()
-            .is_some_and(|id| id != "default")
+        if let Some(id) = patch.default_destination_id.as_deref()
+            && !self.inner.db.destination_exists(id)?
         {
             return Err(AppError::new(
                 ErrorCode::PathNotAllowed,
-                "Only the app-managed download folder is approved.",
+                "Choose an approved download folder.",
             ));
         }
         let settings = self.inner.db.update_settings(patch)?;
@@ -368,6 +368,120 @@ impl DownloadManager {
 
     pub fn list_queues(&self) -> Result<Vec<Queue>, AppError> {
         self.inner.db.list_queues()
+    }
+
+    pub fn list_destinations(&self) -> Result<Vec<Destination>, AppError> {
+        let mut items = vec![Destination {
+            id: "default".into(),
+            label: "App-managed downloads".into(),
+            display_path: display_path(&self.inner.download_dir),
+            is_default: true,
+        }];
+        for (id, label, root) in self.inner.db.list_destinations()? {
+            items.push(Destination {
+                id,
+                label,
+                display_path: display_path(Path::new(&root)),
+                is_default: false,
+            });
+        }
+        Ok(items)
+    }
+
+    pub fn grant_destination(&self, req: GrantDestinationRequest) -> Result<Destination, AppError> {
+        let path = PathBuf::from(req.path.trim());
+        if !path.is_absolute() {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Destination folders must be absolute paths.",
+            ));
+        }
+        let canonical =
+            std::fs::canonicalize(&path).map_err(crate::infrastructure::errors::map_io_err)?;
+        if !canonical.is_dir() {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Choose an existing folder.",
+            ));
+        }
+        // Ensure the directory is usable with the same no-follow writer model.
+        let _ = ManagedFiles::new(&canonical)?;
+        let id = Uuid::new_v4().to_string();
+        let label = req
+            .label
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or_else(|| {
+                canonical
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("Folder")
+                    .to_string()
+            });
+        let root = canonical.to_string_lossy().into_owned();
+        self.inner
+            .db
+            .insert_destination(&id, &label, &root, &Utc::now().to_rfc3339())?;
+        Ok(Destination {
+            id,
+            label,
+            display_path: display_path(&canonical),
+            is_default: false,
+        })
+    }
+
+    pub fn remove_destination(&self, id: &str) -> Result<(), AppError> {
+        if id == "default" {
+            return Err(AppError::new(
+                ErrorCode::PathNotAllowed,
+                "The app-managed downloads folder cannot be removed.",
+            ));
+        }
+        self.inner.db.remove_destination(id)
+    }
+
+    pub fn open_download(&self, id: &str) -> Result<(), AppError> {
+        let task = self.inner.db.get_download(id)?;
+        let path = task.final_path.as_deref().ok_or_else(|| {
+            AppError::new(
+                ErrorCode::StorageNotFound,
+                "This download has no final file to open.",
+            )
+        })?;
+        ensure_path_under_destination(&self.inner, &task.destination_id, path)?;
+        if !Path::new(path).is_file() {
+            return Err(AppError::new(
+                ErrorCode::StorageNotFound,
+                "The completed file is missing.",
+            ));
+        }
+        open::that(path).map_err(|_| {
+            AppError::new(
+                ErrorCode::StorageError,
+                "Could not open the file with the system handler.",
+            )
+        })
+    }
+
+    pub fn reveal_download(&self, id: &str) -> Result<(), AppError> {
+        let task = self.inner.db.get_download(id)?;
+        let candidate = task
+            .final_path
+            .as_deref()
+            .or(task.temp_path.as_deref())
+            .ok_or_else(|| {
+                AppError::new(
+                    ErrorCode::StorageNotFound,
+                    "This download has no folder to reveal.",
+                )
+            })?;
+        ensure_path_under_destination(&self.inner, &task.destination_id, candidate)?;
+        let path = Path::new(candidate);
+        let target = if path.exists() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        reveal_path(target)
     }
 
     /// Cancel every worker, await drains, and refuse further dispatch.
@@ -585,15 +699,17 @@ async fn execute_download(
         .clone()
         .ok_or_else(|| AppError::new(ErrorCode::Internal, "Missing final path"))?;
 
-    let temp_name = managed_name(inner, &temp_path)?;
-    managed_name(inner, &final_path)?;
+    let root = resolve_root(inner, &task.destination_id)?;
+    let files = ManagedFiles::new(&root)?;
+    let temp_name = managed_name(&root, &temp_path)?;
+    managed_name(&root, &final_path)?;
     if task.finalization.is_some() {
         return Err(AppError::new(
             ErrorCode::ResourceChanged,
             "Restart Circle to recover the verified publication before retrying.",
         ));
     }
-    let resume_from = inner.files.length(&temp_name)?.unwrap_or(0);
+    let resume_from = files.length(&temp_name)?.unwrap_or(0);
     task.downloaded_bytes = resume_from;
 
     {
@@ -607,7 +723,7 @@ async fn execute_download(
     }
 
     let download = download_managed(
-        (&inner.http, &inner.files),
+        (&inner.http, &files),
         &task.url,
         Path::new(&temp_path),
         ResumeMetadata {
@@ -710,29 +826,125 @@ async fn execute_download(
     task.finalization = Some("ready".into());
     task.bump_revision();
     inner.db.upsert_download(&task)?;
-    inner.files.publish(
+    files.publish(
         &temp_name,
-        &managed_name(inner, &final_path)?,
+        &managed_name(&root, &final_path)?,
         &result.sha256_hex,
         Some(&result.verified_file),
     )?;
-    complete_and_cleanup(inner, &mut task)?;
+    complete_and_cleanup(inner, &files, &root, &mut task)?;
     emit(inner, &task);
     Ok(())
 }
 
-fn managed_name(inner: &ManagerInner, path: &str) -> Result<PathBuf, AppError> {
+fn resolve_root(inner: &ManagerInner, destination_id: &str) -> Result<PathBuf, AppError> {
+    if destination_id == "default" {
+        return Ok(inner.download_dir.clone());
+    }
+    let path = inner
+        .db
+        .get_destination_path(destination_id)?
+        .ok_or_else(|| {
+            AppError::new(
+                ErrorCode::PathNotAllowed,
+                "Choose an approved download folder.",
+            )
+        })?;
+    Ok(PathBuf::from(path))
+}
+
+fn ensure_path_under_destination(
+    inner: &ManagerInner,
+    destination_id: &str,
+    path: &str,
+) -> Result<(), AppError> {
+    let root = resolve_root(inner, destination_id)?;
     let path = Path::new(path);
-    if path.parent() != Some(inner.download_dir.as_path()) {
+    let parent = path.parent().ok_or_else(|| {
+        AppError::new(
+            ErrorCode::PathNotAllowed,
+            "The saved download path is outside the approved folder.",
+        )
+    })?;
+    if parent != root.as_path() {
         return Err(AppError::new(
             ErrorCode::PathNotAllowed,
             "The saved download path is outside the approved folder.",
         ));
     }
-    Ok(PathBuf::from(inner.files.name(path)?))
+    Ok(())
 }
 
-fn complete_and_cleanup(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), AppError> {
+fn managed_name(root: &Path, path: &str) -> Result<PathBuf, AppError> {
+    let path = Path::new(path);
+    if path.parent() != Some(root) {
+        return Err(AppError::new(
+            ErrorCode::PathNotAllowed,
+            "The saved download path is outside the approved folder.",
+        ));
+    }
+    let name = path.file_name().ok_or_else(|| {
+        AppError::new(
+            ErrorCode::PathNotAllowed,
+            "The saved download path is outside the approved folder.",
+        )
+    })?;
+    Ok(PathBuf::from(name))
+}
+
+fn display_path(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn reveal_path(path: &Path) -> Result<(), AppError> {
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .args(["-R", &path.to_string_lossy()])
+            .spawn()
+            .map_err(|_| {
+                AppError::new(
+                    ErrorCode::StorageError,
+                    "Could not reveal the file in Finder.",
+                )
+            })?;
+        Ok(())
+    }
+    #[cfg(target_os = "windows")]
+    {
+        std::process::Command::new("explorer")
+            .arg(format!("/select,{}", path.to_string_lossy()))
+            .spawn()
+            .map_err(|_| {
+                AppError::new(
+                    ErrorCode::StorageError,
+                    "Could not reveal the file in Explorer.",
+                )
+            })?;
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let folder = if path.is_dir() {
+            path
+        } else {
+            path.parent().unwrap_or(path)
+        };
+        open::that(folder).map_err(|_| {
+            AppError::new(
+                ErrorCode::StorageError,
+                "Could not open the download folder.",
+            )
+        })
+    }
+}
+
+fn complete_and_cleanup(
+    inner: &ManagerInner,
+    files: &ManagedFiles,
+    root: &Path,
+    task: &mut DownloadTask,
+) -> Result<(), AppError> {
     task.status = DownloadStatus::Completed;
     task.error = None;
     task.speed_bytes_per_second = 0;
@@ -740,7 +952,7 @@ fn complete_and_cleanup(inner: &ManagerInner, task: &mut DownloadTask) -> Result
     task.bump_revision();
     inner.db.upsert_download(task)?; // Keep partial path until completed state is durable.
     if let Some(temp) = &task.temp_path {
-        inner.files.remove(&managed_name(inner, temp)?)?;
+        files.remove(&managed_name(root, temp)?)?;
     }
     task.temp_path = None;
     task.finalization = None;
@@ -756,8 +968,10 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
     let Some(final_path) = task.final_path.as_deref() else {
         return Ok(());
     };
-    let final_name = managed_name(inner, final_path)?;
-    let final_exists = inner.files.length(&final_name)?.is_some();
+    let root = resolve_root(inner, &task.destination_id)?;
+    let files = ManagedFiles::new(&root)?;
+    let final_name = managed_name(&root, final_path)?;
+    let final_exists = files.length(&final_name)?.is_some();
     if task.finalization.is_some() {
         if !matches!(task.finalization.as_deref(), Some("ready" | "cleanup")) {
             return Err(AppError::new(
@@ -783,7 +997,7 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
             ));
         }
         if final_exists {
-            if inner.files.digest(&final_name)? != digest {
+            if files.digest(&final_name)? != digest {
                 return Err(AppError::new(
                     ErrorCode::ChecksumMismatch,
                     "The final file differs from the verified checkpoint. Both files were kept.",
@@ -796,11 +1010,9 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
                     "The verified partial and final file are missing.",
                 )
             })?;
-            inner
-                .files
-                .publish(&managed_name(inner, temp)?, &final_name, digest, None)?;
+            files.publish(&managed_name(&root, temp)?, &final_name, digest, None)?;
         }
-        return complete_and_cleanup(inner, task);
+        return complete_and_cleanup(inner, &files, &root, task);
     }
     if task.status == DownloadStatus::Completed {
         if !final_exists {
@@ -810,7 +1022,7 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
             ));
         }
         if let Some(digest) = &task.actual_sha256
-            && inner.files.digest(&final_name)? != *digest
+            && files.digest(&final_name)? != *digest
         {
             return Err(AppError::new(
                 ErrorCode::ChecksumMismatch,
@@ -826,7 +1038,7 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
         ));
     }
     if let Some(temp) = &task.temp_path {
-        let length = inner.files.length(&managed_name(inner, temp)?)?;
+        let length = files.length(&managed_name(&root, temp)?)?;
         match length {
             Some(length) => {
                 if task.total_bytes.is_some_and(|total| length > total) {

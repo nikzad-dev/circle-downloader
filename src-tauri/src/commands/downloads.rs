@@ -86,3 +86,13 @@ pub fn manager_from_state(state: &AppState) -> &DownloadManager {
 pub fn unsubscribe_progress(state: State<'_, AppState>, subscription_id: u32) {
     state.manager.progress_hub().unsubscribe(subscription_id);
 }
+
+#[tauri::command]
+pub fn open_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.manager.open_download(&id).map_err(map_err)
+}
+
+#[tauri::command]
+pub fn reveal_download(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    state.manager.reveal_download(&id).map_err(map_err)
+}

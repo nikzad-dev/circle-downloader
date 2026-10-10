@@ -24,8 +24,20 @@ function setup() {
   render(<QueryClientProvider client={client}><Harness /></QueryClientProvider>)
   return { client, user: userEvent.setup() }
 }
+function stubSupportCommands() {
+  invoke.mockImplementation(async (command: string) => {
+    if (command === 'list_destinations') {
+      return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
+    }
+    if (command === 'get_settings') {
+      return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+    }
+    throw new Error(`Unexpected command ${command}`)
+  })
+}
 beforeEach(() => {
   invoke.mockReset()
+  stubSupportCommands()
 })
 describe('add Download workflow', () => {
   it('validates input without invoking native commands', async () => {
@@ -36,10 +48,20 @@ describe('add Download workflow', () => {
     await user.type(screen.getByLabelText('Download URL'), 'http://example.com/file')
     await user.click(screen.getByRole('button', { name: 'Add download' }))
     expect(await screen.findByText('Use HTTPS, or HTTP for localhost only.')).toBeInTheDocument()
-    expect(invoke).not.toHaveBeenCalled()
+    expect(invoke.mock.calls.every(([command]) => command !== 'create_download')).toBe(true)
   })
   it('creates trimmed input, omits blank filename, writes shared cache and restores focus', async () => {
-    invoke.mockResolvedValue(task({ status: 'paused' }))
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'list_destinations') {
+        return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
+      }
+      if (command === 'get_settings') {
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+      }
+      if (command === 'create_download')
+        return task({ status: 'paused' })
+      throw new Error(command)
+    })
     const { user, client } = setup()
     await user.click(screen.getByText('Open add'))
     await waitFor(() => expect(screen.getByLabelText('Download URL')).toHaveFocus())
@@ -52,7 +74,22 @@ describe('add Download workflow', () => {
     await waitFor(() => expect(screen.getByText('Open add')).toHaveFocus())
   })
   it('retains values and the request ID when retrying a failed operation', async () => {
-    invoke.mockRejectedValueOnce({ code: 'DISK_FULL', message: 'full', retryable: false }).mockResolvedValueOnce(task())
+    let createCalls = 0
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'list_destinations') {
+        return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
+      }
+      if (command === 'get_settings') {
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+      }
+      if (command === 'create_download') {
+        createCalls += 1
+        if (createCalls === 1)
+          throw { code: 'DISK_FULL', message: 'full', retryable: false }
+        return task()
+      }
+      throw new Error(command)
+    })
     const { user } = setup()
     await user.click(screen.getByText('Open add'))
     await user.type(screen.getByLabelText('Download URL'), 'https://example.com/file.zip')
@@ -61,20 +98,32 @@ describe('add Download workflow', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Free some disk space')
     expect(screen.getByLabelText('Download URL')).toHaveValue('https://example.com/file.zip')
     await user.click(screen.getByRole('button', { name: 'Add download' }))
-    await waitFor(() => expect(invoke).toHaveBeenCalledTimes(2))
-    expect(invoke.mock.calls[0][1]).toEqual(invoke.mock.calls[1][1])
-    expect(invoke.mock.calls[1][1]).toMatchObject({ input: { suggestedName: 'custom.zip' } })
+    await waitFor(() => expect(createCalls).toBe(2))
+    const createArgs = invoke.mock.calls.filter(([command]) => command === 'create_download').map(call => call[1])
+    expect(createArgs[0]).toEqual(createArgs[1])
+    expect(createArgs[1]).toMatchObject({ input: { suggestedName: 'custom.zip' } })
   })
   it('prevents duplicate submissions while pending', async () => {
     let resolve!: (value: ReturnType<typeof task>) => void
-    invoke.mockImplementation(async () => new Promise((done) => {
-      resolve = done
-    }))
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'list_destinations') {
+        return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
+      }
+      if (command === 'get_settings') {
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+      }
+      if (command === 'create_download') {
+        return new Promise((done) => {
+          resolve = done
+        })
+      }
+      throw new Error(command)
+    })
     const { user } = setup()
     await user.click(screen.getByText('Open add'))
     await user.type(screen.getByLabelText('Download URL'), 'https://example.com/file.zip')
     await user.dblClick(screen.getByRole('button', { name: 'Add download' }))
-    expect(invoke).toHaveBeenCalledTimes(1)
+    expect(invoke.mock.calls.filter(([command]) => command === 'create_download')).toHaveLength(1)
     expect(screen.getByRole('button', { name: 'Adding…' })).toBeDisabled()
     await user.keyboard('{Escape}')
     expect(screen.getByRole('dialog')).toBeInTheDocument()
@@ -82,20 +131,31 @@ describe('add Download workflow', () => {
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
   })
   it('validates a supplied SHA-256 and passes it to the native command', async () => {
-    invoke.mockResolvedValue(task())
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'list_destinations') {
+        return [{ id: 'default', label: 'App-managed downloads', displayPath: '/tmp/downloads', isDefault: true }]
+      }
+      if (command === 'get_settings') {
+        return { maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true }
+      }
+      if (command === 'create_download')
+        return task()
+      throw new Error(command)
+    })
     const { user } = setup()
     await user.click(screen.getByText('Open add'))
     await user.type(screen.getByLabelText('Download URL'), 'https://example.com/file.zip')
     await user.type(screen.getByLabelText(/SHA-256/), 'bad')
     await user.click(screen.getByRole('button', { name: 'Add download' }))
     expect(await screen.findByText('Enter a 64-character SHA-256 checksum.')).toBeInTheDocument()
-    expect(invoke).not.toHaveBeenCalled()
+    expect(invoke.mock.calls.every(([command]) => command !== 'create_download')).toBe(true)
     await user.clear(screen.getByLabelText(/SHA-256/))
     const checksum = 'a'.repeat(64)
     await user.type(screen.getByLabelText(/SHA-256/), checksum)
     await user.click(screen.getByRole('button', { name: 'Add download' }))
-    await waitFor(() => expect(invoke).toHaveBeenCalled())
-    expect(invoke.mock.calls[0][1]).toMatchObject({ input: { expectedSha256: checksum } })
+    await waitFor(() => expect(invoke.mock.calls.some(([command]) => command === 'create_download')).toBe(true))
+    const createCall = invoke.mock.calls.find(([command]) => command === 'create_download')
+    expect(createCall?.[1]).toMatchObject({ input: { expectedSha256: checksum } })
   })
   it('closes with Escape and restores trigger focus', async () => {
     const { user } = setup()

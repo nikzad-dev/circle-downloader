@@ -55,6 +55,7 @@ pub fn run() {
     let allow_exit_setup = allow_exit.clone();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
@@ -106,6 +107,11 @@ pub fn run() {
             commands::settings::get_settings,
             commands::settings::update_settings,
             commands::queues::list_queues,
+            commands::destinations::list_destinations,
+            commands::destinations::grant_destination,
+            commands::destinations::remove_destination,
+            commands::downloads::open_download,
+            commands::downloads::reveal_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building Circle Downloader")

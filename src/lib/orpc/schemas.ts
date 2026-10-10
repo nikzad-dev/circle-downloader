@@ -121,6 +121,18 @@ export const queueSchema = z.object({
   taskCount: z.number().int().nonnegative(),
 })
 
+export const destinationSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  displayPath: z.string().min(1),
+  isDefault: z.boolean(),
+})
+
+export const grantDestinationInputSchema = z.object({
+  path: z.string().min(1),
+  label: z.string().min(1).optional(),
+})
+
 export const appErrorSchema = z.object({
   code: errorCodeSchema,
   message: z.string(),
@@ -134,4 +146,5 @@ export type CreateDownloadInput = z.infer<typeof createDownloadInputSchema>
 export type ProgressEvent = z.infer<typeof progressEventSchema>
 export type Settings = z.infer<typeof settingsSchema>
 export type Queue = z.infer<typeof queueSchema>
+export type Destination = z.infer<typeof destinationSchema>
 export type AppError = z.infer<typeof appErrorSchema>

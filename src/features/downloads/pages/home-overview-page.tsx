@@ -57,12 +57,12 @@ export function HomeOverviewPage() {
                     <Download className="size-4 text-muted-foreground" aria-hidden="true" />
                     <h2 className="font-heading text-lg font-semibold">Recent downloads</h2>
                   </div>
-                  <div className="border bg-card"><DownloadsTable tasks={recent} /></div>
+                  <div className="border bg-card"><DownloadsTable tasks={recent} showSelection={false} /></div>
                 </div>
                 {failures.length > 0 && (
                   <div>
                     <h2 className="mb-4 font-heading text-lg font-semibold">Recent failures</h2>
-                    <div className="border bg-card"><DownloadsTable tasks={failures} /></div>
+                    <div className="border bg-card"><DownloadsTable tasks={failures} showSelection={false} /></div>
                   </div>
                 )}
               </>

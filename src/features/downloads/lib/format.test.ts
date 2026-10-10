@@ -18,9 +18,9 @@ describe('download presentation', () => {
     expect(taskActions('failed').retry).toBe(true)
   })
   it.each(['https://example.com/a', 'http://localhost/a', 'http://127.0.0.1/a', 'http://[::1]/a'])('accepts supported URL %s', (url) => {
-    expect(createFormSchema.parse({ url: ` ${url} `, suggestedName: ' name.zip ', startNow: true }).suggestedName).toBe('name.zip')
+    expect(createFormSchema.parse({ url: ` ${url} `, suggestedName: ' name.zip ', destinationId: 'default', startNow: true }).suggestedName).toBe('name.zip')
   })
   it.each(['bad', 'http://example.com/a', 'ftp://example.com/a'])('rejects unsupported URL %s', (url) => {
-    expect(createFormSchema.safeParse({ url, suggestedName: '', startNow: true }).success).toBe(false)
+    expect(createFormSchema.safeParse({ url, suggestedName: '', destinationId: 'default', startNow: true }).success).toBe(false)
   })
 })
