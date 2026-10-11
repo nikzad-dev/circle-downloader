@@ -2,13 +2,17 @@
 
 A local desktop download manager built with Tauri, Rust, React and shadcn/ui. Rust owns transfers and persisted tasks; the interface shows real status, bytes and speed through native progress channels.
 
-**Status: development MVP, version 0.1.0.** The core workflow is implemented. Scheduling, supported-platform durability, security/release QA and installer verification remain before a production release. See the [implementation audit and roadmap](ROADMAP.md) for completed work, known gaps and the next phases.
+**Status: development MVP, version 0.1.0.** The core workflow is implemented. Supported-platform durability, security/release QA and installer verification remain before a production release. See the [implementation audit and roadmap](ROADMAP.md) for completed work, known gaps and the next phases.
 
 ## Current features
 
-- Compact shadcn File/View/Help menubar with top navigation, keyboard controls and Light/Dark/System appearance; no sidebar.
+- Compact shadcn Pages/Appearance menubar and resizable sidebar with accordion sections for transfer states, queues, categories and tags.
 - Home overview with real transfer counts, recent downloads and failures.
-- Add Download with URL validation, optional filename, approved destination and Start now.
+- Durable queues with per-queue concurrency/rate caps, round-robin dispatch, aged priorities and one-shot schedules with explicit IANA time zones and DST handling.
+- Categories/tags, filtered history and retry-safe bulk URL import (up to 200 unique lines).
+- Explicit proxy/timeout settings and scoped credentials stored in the OS credential vault.
+- Statistics from durable transfer measurements; empty history shows an empty state.
+- Separate compact download window with Single/Multiple URL modes, visible destination, optional organization/scheduling and additional features revealed on demand.
 - Downloads table with search/filter/sort, bulk actions, progress, bytes, speed and task actions.
 - Task details Sheet via `/downloads/$downloadId` (redacted source, retries, verification).
 - Pause, resume, cancel, manual retry, Open/Reveal and removal confirmation.
@@ -56,13 +60,29 @@ Reuse that directory to test persistence across restarts. On Windows, set the sa
 
 ## Using the app
 
-1. Open **Add download** from the toolbar, Home, or ⌘/Ctrl+N (⌘/Ctrl+V pastes a clipboard URL when focus is not in an input).
+1. Open the separate **Add download** window from the toolbar, Home, or ⌘/Ctrl+N (⌘/Ctrl+V outside text fields detects one or multiple clipboard URLs and prefills the matching mode). Reopening focuses the existing window and preserves its draft.
 2. Paste a direct public HTTPS file URL without embedded credentials or fragments. Private/special-use addresses, unsafe redirects and remote plain HTTP are rejected. Debug builds additionally accept loopback fixture links; release builds do not enable HTTP/LAN access.
-3. Optionally set a filename, choose an approved destination folder and a trusted 64-character SHA-256 checksum. Circle compares the complete file with that checksum before publishing; without one it reports a calculated digest rather than verified integrity. Leave **Start now** selected to begin, or clear it to save the task as Paused and choose **Resume** later. A disabled backend auto-start setting also saves it paused.
+3. Choose an approved destination. Enable **Organize download** for queue/priority/category/tags or **Schedule start** for a timed start. **More options** contains optional filename, saved credentials, multiple connections and a trusted 64-character SHA-256 checksum. Circle compares the complete file with that checksum before publishing; without one it reports a calculated digest rather than verified integrity. Leave **Start automatically** selected to begin, or clear it to save the task as Paused and choose **Resume** later. A disabled backend auto-start setting also saves it paused.
 4. Follow progress in **Downloads**. Use search, status and sort controls; select rows for bulk Pause/Resume/Retry/Cancel/Remove. Open a row (or deep-link `/downloads/$id`) for details. Failed tasks offer manual **Retry**. Completed tasks offer **Open** and **Reveal**.
 5. Choose **Remove** to remove a record. The confirmation offers partial-file deletion for unfinished tasks, enabled by default. Completed files remain on disk.
 
 Appearance, auto-start, task concurrency (1–32), connections per download (1–4) and the default destination are editable in Settings. Connection changes apply when a transfer starts or resumes; existing single-connection partials keep their original mode, and existing segment plans resume with the current connection cap. Approve extra folders there; Circle never replaces an existing file when naming collisions occur. Automatic retries (up to 5) and the per-host limit (2) are shown read-only.
+
+### Queues, schedules and network controls
+
+Open **Pages → Queues** to create queues and change their worker/rate limits. Rate fields use KiB/s; zero means unlimited. Global limits in Settings cover every queue and connection. Pausing a queue blocks new starts; active transfers finish. To stop an active transfer, pause that download. Queues rotate fairly; within each queue priority ranges from Lowest to Highest, with waiting time preventing starvation.
+
+Pause a download and open its details to change its queue, priority, category, tags, schedule or credential grant. **Schedule start** records a local date/time, IANA time zone and explicit earlier/later choice for repeated DST times. Nonexistent local times are rejected. Saved schedules preserve their UTC instant; queued overdue work starts on reopen. The app must be running to start at the scheduled time; it does not wake the OS or run while quit. Changing controls does not automatically resume a paused download.
+
+**Import URLs** opens the same window in Multiple URLs mode and accepts one URL per line, deduplicates lines and applies shared controls. Successful entries persist; retrying an unchanged failed batch does not duplicate or restart existing work. Auto-start settings still apply. Imports use the default approved destination.
+
+Settings accepts an explicit HTTP/HTTPS proxy origin without embedded credentials, plus a connection timeout. System/environment proxies are ignored. Proxy/timeout changes and credential revocation require paused transfers. TLS verification stays enabled; an explicitly configured proxy is trusted to resolve destinations.
+
+Authorize credentials for one exact HTTPS download origin or one proxy origin, then select the opaque grant. Usernames/passwords are stored in the OS credential store, never SQLite. Credential-bearing downloads reject redirects to a different origin; proxy credentials belong only to proxy authentication. Failed vault access fails closed with a redacted error.
+
+**Pages → Statistics** shows body bytes actually received during completed, failed and interrupted attempts, including retries, and elapsed transfer-worker time. It excludes probe bodies and protocol overhead. Worker time includes throttling and verification, is summed across workers, and is not wall-clock usage. Totals survive task removal; the latest 30 days with activity use UTC. Measurements commit when a worker stops; forcibly terminating a process can lose its current uncommitted measurement. No sample graphs appear in product flows.
+
+Local regression and repeated benchmark evidence: [N4b verification](docs/verification/N4B_ADVANCED_2026-10-11.md).
 
 ### Where files and history live
 
@@ -151,3 +171,9 @@ Keep changes focused, preserve the existing shadcn tokens/components, and add te
 For vulnerability reporting, security boundaries and known limitations, see [SECURITY.md](SECURITY.md). Request a private reporting channel before sharing sensitive vulnerability details.
 
 **License:** this project is licensed under [GPL-3.0-or-later](LICENSE). Dependencies retain their own licenses; see the [dependency inventory](docs/DEPENDENCIES.md) for release review.
+
+The download window defaults to 600×520 and keeps its action footer visible while options scroll. Switching modes retains both drafts. Disabled acceleration uses one connection for this download, independent of the global preference. Creating a configured download validates options before creation and persists them before dispatch. The app prepares this window in the background after startup. Closing it hides the loaded webview; the next opening starts a fresh form without recreating the window. Opening an already visible window focuses its existing draft. Closing the main workspace still hides it to the tray. Restart the native development app after changing Rust window commands.
+
+Download categories are Compressed, Documents, Music, Pictures, Programs and Videos. The Category dropdown defaults to Automatic and previews the filename-based choice. A manual selection overrides detection; switching back to Automatic restores it. Bulk imports classify each file separately. Unknown extensions stay uncategorized, and existing custom category assignments remain available. Sidebar counts and filters include automatically categorized existing downloads. Classification changes organization only; it never moves a file.
+
+Paste a single HTTP(S) link anywhere in the main workspace outside an editor to open Single URL mode. Paste links separated by newlines, spaces or tabs to open Multiple URLs mode with duplicates removed. Links are prepared for review; pasting never starts transfers. If a download draft is already open, choose Use pasted links or Keep draft. Ordinary text and pastes inside input fields or dialogs retain normal behavior. Imports support up to 200 unique links.

@@ -5,6 +5,7 @@ import { useNavigate } from '@tanstack/react-router'
 import { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toast'
+import { useTaskOptions } from '@/features/advanced/api'
 import { orpc } from '@/lib/orpc/client'
 import { mergeTask, reconcileDownloads, removeTask, useDownloads } from '../api/downloads'
 import { DownloadsEmpty, DownloadsError, DownloadsLoading } from '../components/downloads-state'
@@ -24,6 +25,8 @@ export function DownloadsPage({
   detailsSlot?: ReactNode
 }) {
   const query = useDownloads()
+  const options = useTaskOptions()
+  const optionsById = useMemo(() => new Map(options.data?.map(o => [o.id, o])), [options.data])
   const connection = useProgressConnection()
   const navigate = useNavigate()
   const client = useQueryClient()
@@ -31,8 +34,8 @@ export function DownloadsPage({
   const [bulkPending, setBulkPending] = useState(false)
 
   const visible = useMemo(
-    () => filterAndSortTasks(query.data ?? [], search),
-    [query.data, search],
+    () => filterAndSortTasks(query.data ?? [], search, optionsById),
+    [query.data, search, optionsById],
   )
   const selectedIds = Object.keys(rowSelection).filter(id => rowSelection[id])
 
@@ -40,6 +43,7 @@ export function DownloadsPage({
     void navigate({
       to: '.',
       search: {
+        ...next,
         q: next.q,
         status: next.status === 'all' ? undefined : next.status,
         sort: next.sort === 'created_asc' ? undefined : next.sort,
@@ -98,19 +102,20 @@ export function DownloadsPage({
   }
 
   return (
-    <section className="space-y-6">
-      <div className="flex items-end justify-between gap-4">
-        <div>
-          <p className="mb-2 text-xs font-semibold tracking-widest text-muted-foreground uppercase">Your library</p>
-          <h1 className="font-heading text-3xl font-semibold tracking-tight">Downloads</h1>
-          <p className="mt-2 text-sm text-muted-foreground">Every file. Every step. All in one place.</p>
+    <section className="space-y-4">
+      <h1 className="sr-only">Downloads</h1>
+      {[search.category, search.tag, search.queueId].some(value => value !== undefined && value !== '') && (
+        <div className="flex items-center gap-2 text-xs text-muted-foreground">
+          <span>{[search.category, search.tag, search.queueId].filter(Boolean).join(' · ')}</span>
+          <Button size="sm" variant="ghost" onClick={() => onSearchChange({ ...search, category: undefined, tag: undefined, queueId: undefined })}>Clear organization filter</Button>
         </div>
-        <span className="shrink-0 pb-1 text-xs text-muted-foreground tabular-nums">
-          {query.data
-            ? `${visible.length}${visible.length !== query.data.length ? ` of ${query.data.length}` : ''} ${query.data.length === 1 ? 'file' : 'files'}`
-            : '—'}
-        </span>
-      </div>
+      )}
+      {options.isError && (
+        <div role="alert" className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm">
+          <span>Queue, category and tag details could not be loaded.</span>
+          <Button size="sm" variant="outline" onClick={() => void options.refetch()}>Retry organization details</Button>
+        </div>
+      )}
       {connection.unavailable && (
         <div role="status" className="flex flex-wrap items-center justify-between gap-3 border bg-muted/40 p-3 text-sm">
           <span>Live updates unavailable. Refresh to check progress.</span>
@@ -141,11 +146,13 @@ export function DownloadsPage({
                 <div className="border bg-card">
                   <DownloadsToolbar
                     search={{
+                      ...search,
                       q: search.q,
                       status: search.status ?? 'all',
                       sort: search.sort ?? 'created_asc',
                     }}
                     onChange={onSearchChange}
+                    fileCount={`${visible.length}${visible.length !== query.data.length ? ` of ${query.data.length}` : ''} ${query.data.length === 1 ? 'file' : 'files'}`}
                     selectedCount={selectedIds.length}
                     onBulk={action => void onBulk(action)}
                     bulkPending={bulkPending}

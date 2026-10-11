@@ -2096,3 +2096,349 @@ async fn segmented_downloads_still_share_the_global_task_slot() {
         );
     }
 }
+
+#[tokio::test]
+async fn bulk_import_is_validated_before_mutation_and_retry_safe() {
+    use crate::application::manager::advanced::BulkImport;
+    use crate::domain::advanced::TaskOptions;
+    let (_dir, mgr) = manager();
+    let options = TaskOptions {
+        queue_id: "default".into(),
+        category: "Research".into(),
+        tags: vec!["papers".into()],
+        priority: 2,
+        ..Default::default()
+    };
+    let input = |urls: Vec<String>| BulkImport {
+        urls,
+        options: options.clone(),
+        start_now: false,
+        batch_id: "retry-safe".into(),
+    };
+    assert!(
+        mgr.bulk_import(input(vec![
+            "https://example.com/a".into(),
+            "file:///private/secret".into()
+        ]))
+        .await
+        .is_err()
+    );
+    assert!(mgr.list().unwrap().is_empty());
+    let urls = vec![
+        "https://example.com/a".into(),
+        "https://example.com/b".into(),
+    ];
+    let first = mgr.bulk_import(input(urls.clone())).await.unwrap();
+    let second = mgr.bulk_import(input(urls)).await.unwrap();
+    assert!(first.errors.is_empty());
+    assert_eq!(
+        first.created.iter().map(|t| &t.id).collect::<Vec<_>>(),
+        second.created.iter().map(|t| &t.id).collect::<Vec<_>>()
+    );
+    assert_eq!(mgr.list().unwrap().len(), 2);
+    assert!(
+        mgr.task_options()
+            .unwrap()
+            .iter()
+            .all(|o| o.category == "Research" && o.priority == 2 && o.tags == ["papers"])
+    );
+}
+
+#[tokio::test]
+async fn queue_pause_preserves_intent_and_schedule_wakes_without_user_action() {
+    use crate::domain::advanced::TaskOptions;
+    let (_dir, mgr) = manager();
+    let url = spawn_fixture_server(|_| (200, b"scheduled bytes".to_vec())).await;
+    let mut queue = mgr.queue_policies().unwrap().remove(0);
+    queue.paused = true;
+    mgr.save_queue(queue.clone()).await.unwrap();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    mgr.update_task_options(TaskOptions {
+        id: task.id.clone(),
+        queue_id: queue.id.clone(),
+        ..Default::default()
+    })
+    .unwrap();
+    mgr.resume(&task.id).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(mgr.get(&task.id).unwrap().status, DownloadStatus::Queued);
+    // Persist a subsecond UTC deadline directly; the UI's local date picker has minute precision.
+    let db = Database::open(_dir.path().join("test.db")).unwrap();
+    let mut options = db.task_options(&task.id).unwrap();
+    options.scheduled_at = Some(chrono::Utc::now() + chrono::Duration::milliseconds(350));
+    db.save_task_options(&options).unwrap();
+    queue.paused = false;
+    mgr.save_queue(queue).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(mgr.get(&task.id).unwrap().status, DownloadStatus::Queued);
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+        b"scheduled bytes"
+    );
+}
+
+#[tokio::test]
+async fn segmented_transfer_obeys_shared_rates_and_records_real_bytes() {
+    use crate::domain::advanced::NetworkSettings;
+    for connections in [1, 4] {
+        let (_dir, mgr) = manager();
+        mgr.update_settings(UpdateSettingsRequest {
+            max_connections_per_download: Some(connections),
+            ..Default::default()
+        })
+        .unwrap();
+        mgr.save_network(NetworkSettings {
+            bytes_per_second: 32 * 1024 * 1024,
+            ..Default::default()
+        })
+        .unwrap();
+        let mut queue = mgr.queue_policies().unwrap().remove(0);
+        queue.bytes_per_second = 16 * 1024 * 1024;
+        mgr.save_queue(queue).await.unwrap();
+        let fixture = segment_fixture(Duration::ZERO, 0).await;
+        let start = std::time::Instant::now();
+        let task = create_segment_task(&mgr, &fixture);
+        wait_for_status(
+            &mgr,
+            &task.id,
+            &[DownloadStatus::Completed],
+            Duration::from_secs(6),
+        )
+        .await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(490),
+            "connections={connections} bypassed queue limit"
+        );
+        assert_eq!(
+            std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+            *fixture.body
+        );
+        // Completion is committed before the worker's durable measurement; wait for that commit.
+        for _ in 0..100 {
+            if mgr.statistics().unwrap().completed_attempts == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let stats = mgr.statistics().unwrap();
+        assert_eq!(stats.transferred_bytes, fixture.body.len() as u64);
+        assert_eq!(stats.completed_attempts, 1);
+        assert!(stats.transfer_millis >= 490);
+    }
+}
+
+#[tokio::test]
+async fn dispatch_rotates_queues_and_honors_priority_within_each_queue() {
+    use crate::domain::advanced::{QueuePolicy, TaskOptions};
+    let (_dir, mgr) = manager();
+    mgr.update_settings(UpdateSettingsRequest {
+        max_concurrent_downloads: Some(1),
+        ..Default::default()
+    })
+    .unwrap();
+    let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let record = seen.clone();
+    let url = spawn_fixture_server(move |request| {
+        record.lock().unwrap().push(
+            request
+                .lines()
+                .next()
+                .unwrap()
+                .split_whitespace()
+                .nth(1)
+                .unwrap()
+                .to_string(),
+        );
+        (200, b"queue fixture".to_vec())
+    })
+    .await;
+    let mut default = mgr.queue_policies().unwrap().remove(0);
+    default.paused = true;
+    mgr.save_queue(default.clone()).await.unwrap();
+    mgr.save_queue(QueuePolicy {
+        id: "second".into(),
+        name: "Second".into(),
+        paused: true,
+        max_concurrent: 1,
+        bytes_per_second: 0,
+        task_count: 0,
+    })
+    .await
+    .unwrap();
+    let mut ids = vec![];
+    for (name, queue, priority) in [
+        ("low", "default", -2),
+        ("high", "default", 2),
+        ("other", "second", 0),
+    ] {
+        let task = mgr
+            .create(CreateDownloadRequest {
+                url: format!("{url}/{name}"),
+                destination_id: None,
+                suggested_name: None,
+                start_now: false,
+                request_id: None,
+                expected_sha256: None,
+            })
+            .unwrap();
+        mgr.update_task_options(TaskOptions {
+            id: task.id.clone(),
+            queue_id: queue.into(),
+            priority,
+            ..Default::default()
+        })
+        .unwrap();
+        mgr.resume(&task.id).await.unwrap();
+        ids.push(task.id);
+    }
+    // Atomic policy setup keeps all tasks pending until both queues are enabled.
+    let db = Database::open(_dir.path().join("test.db")).unwrap();
+    for mut policy in db.queue_policies().unwrap() {
+        policy.paused = false;
+        db.save_queue(&policy).unwrap();
+    }
+    mgr.dispatch();
+    for id in ids {
+        wait_for_status(
+            &mgr,
+            &id,
+            &[DownloadStatus::Completed],
+            Duration::from_secs(3),
+        )
+        .await;
+    }
+    assert_eq!(*seen.lock().unwrap(), ["/high", "/other", "/low"]);
+}
+
+#[tokio::test]
+async fn configured_creation_persists_controls_before_start_and_rejects_bad_options() {
+    use crate::domain::advanced::TaskOptions;
+    let (_dir, mgr) = manager();
+    let mut queue = mgr.queue_policies().unwrap().remove(0);
+    queue.paused = true;
+    mgr.save_queue(queue).await.unwrap();
+    let request = || CreateDownloadRequest {
+        url: "https://example.com/file".into(),
+        destination_id: None,
+        suggested_name: None,
+        start_now: true,
+        request_id: Some("window-request".into()),
+        expected_sha256: None,
+    };
+    assert!(
+        mgr.create_configured(
+            request(),
+            TaskOptions {
+                queue_id: "default".into(),
+                connections: Some(9),
+                ..Default::default()
+            }
+        )
+        .await
+        .is_err()
+    );
+    assert!(mgr.list().unwrap().is_empty());
+    let controls = TaskOptions {
+        queue_id: "default".into(),
+        connections: Some(2),
+        category: "Research".into(),
+        priority: 2,
+        ..Default::default()
+    };
+    let first = mgr
+        .create_configured(request(), controls.clone())
+        .await
+        .unwrap();
+    let again = mgr.create_configured(request(), controls).await.unwrap();
+    assert_eq!(first.id, again.id);
+    assert_eq!(first.status, DownloadStatus::Queued);
+    assert_eq!(mgr.list().unwrap().len(), 1);
+    let saved = mgr.task_options().unwrap().remove(0);
+    assert_eq!(saved.connections, Some(2));
+    assert_eq!(saved.category, "Research");
+    assert_eq!(saved.priority, 2);
+}
+
+#[tokio::test]
+async fn categories_are_inferred_for_existing_tasks_and_each_bulk_file_with_manual_override() {
+    use crate::application::manager::advanced::BulkImport;
+    use crate::domain::advanced::TaskOptions;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/report.PDF?file=video.mp4".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    let options = || {
+        mgr.task_options()
+            .unwrap()
+            .into_iter()
+            .find(|o| o.id == task.id)
+            .unwrap()
+    };
+    assert_eq!(options().category, "");
+    assert_eq!(options().resolved_category, "Documents");
+    let mut manual = options();
+    manual.category = "Pictures".into();
+    assert_eq!(
+        mgr.update_task_options(manual).unwrap().resolved_category,
+        "Pictures"
+    );
+    let mut automatic = options();
+    automatic.category.clear();
+    assert_eq!(
+        mgr.update_task_options(automatic)
+            .unwrap()
+            .resolved_category,
+        "Documents"
+    );
+    let result = mgr
+        .bulk_import(BulkImport {
+            urls: vec![
+                "https://example.com/song.mp3".into(),
+                "https://example.com/movie.mkv".into(),
+                "https://example.com/download".into(),
+            ],
+            options: TaskOptions {
+                queue_id: "default".into(),
+                ..Default::default()
+            },
+            start_now: false,
+            batch_id: "category-batch".into(),
+        })
+        .await
+        .unwrap();
+    assert!(result.errors.is_empty());
+    for (task, expected) in result.created.iter().zip(["Music", "Videos", ""]) {
+        assert_eq!(
+            mgr.task_options()
+                .unwrap()
+                .into_iter()
+                .find(|o| o.id == task.id)
+                .unwrap()
+                .resolved_category,
+            expected
+        );
+    }
+}

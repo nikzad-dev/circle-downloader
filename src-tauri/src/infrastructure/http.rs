@@ -21,12 +21,14 @@ pub struct DownloadResult {
 
 #[derive(Debug, Clone, Default)]
 pub struct ResumeMetadata {
+    pub effective_url: Option<String>,
     pub offset: u64,
     pub etag: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ResponseMetadata {
+    pub effective_url: String,
     pub total_bytes: Option<u64>,
     pub etag: Option<String>,
     pub last_modified: Option<String>,
@@ -47,6 +49,7 @@ impl ByteRange {
 
 #[derive(Debug, Clone)]
 pub struct SegmentCapability {
+    pub effective_url: String,
     pub total_bytes: u64,
     pub etag: String,
     pub last_modified: Option<String>,
@@ -62,9 +65,27 @@ pub struct ProgressUpdate {
 
 pub struct CancelToken {
     rx: watch::Receiver<bool>,
+    pub limits: Vec<std::sync::Arc<super::rate_limit::RateLimiter>>,
+    pub measured_bytes: std::sync::Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl CancelToken {
+    pub async fn throttle(&self, bytes: usize) -> Result<(), AppError> {
+        for limit in &self.limits {
+            if !limit.consume(bytes, self).await {
+                return Err(canceled());
+            }
+        }
+        Ok(())
+    }
+    pub fn inherit_limits(&mut self, parent: &Self) {
+        self.limits = parent.limits.clone();
+        self.measured_bytes = parent.measured_bytes.clone();
+    }
+    pub fn record_bytes(&self, bytes: usize) {
+        self.measured_bytes
+            .fetch_add(bytes as u64, std::sync::atomic::Ordering::Relaxed);
+    }
     pub fn is_cancelled(&self) -> bool {
         *self.rx.borrow()
     }
@@ -77,7 +98,14 @@ impl CancelToken {
 
 pub fn cancel_pair() -> (watch::Sender<bool>, CancelToken) {
     let (tx, rx) = watch::channel(false);
-    (tx, CancelToken { rx })
+    (
+        tx,
+        CancelToken {
+            rx,
+            limits: vec![],
+            measured_bytes: std::sync::Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        },
+    )
 }
 
 fn canceled() -> AppError {
@@ -98,6 +126,17 @@ fn validate_metadata(
     response: &reqwest::Response,
     resume: &ResumeMetadata,
 ) -> Result<ResponseMetadata, AppError> {
+    if resume.offset > 0
+        && resume
+            .effective_url
+            .as_ref()
+            .is_some_and(|u| u != response.url().as_str())
+    {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "The download redirected to a different source. Keep the partial and add a fresh download.",
+        ));
+    }
     let headers = response.headers();
     let etag = headers
         .get(header::ETAG)
@@ -146,6 +185,7 @@ fn validate_metadata(
         response.content_length()
     };
     Ok(ResponseMetadata {
+        effective_url: response.url().to_string(),
         total_bytes,
         etag,
         last_modified,
@@ -273,6 +313,7 @@ pub async fn probe_segment_capability(
     if total < 2 {
         return Ok(None);
     }
+    let effective_url = response.url().to_string();
     // Consume the one-byte body so the connection can close cleanly.
     if !consume_probe(response, cancel, timeouts.body).await? {
         return Ok(None);
@@ -289,7 +330,9 @@ pub async fn probe_segment_capability(
         _ = cancel.cancelled() => return Err(canceled()),
         result = tokio::time::timeout(timeouts.headers, mid_request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
     };
-    if mid_response.status() != StatusCode::PARTIAL_CONTENT {
+    if mid_response.url().as_str() != effective_url
+        || mid_response.status() != StatusCode::PARTIAL_CONTENT
+    {
         return Ok(None);
     }
     if reject_encoded(&mid_response).is_err() {
@@ -315,6 +358,7 @@ pub async fn probe_segment_capability(
         return Ok(None);
     }
     Ok(Some(SegmentCapability {
+        effective_url,
         total_bytes: total,
         etag,
         last_modified,
@@ -349,6 +393,7 @@ async fn consume_probe(
 
 /// Download an exact inclusive byte range into a dedicated segment file.
 pub struct RangeRequest<'a> {
+    pub effective_url: Option<&'a str>,
     pub url: &'a str,
     pub dest: &'a Path,
     pub range: ByteRange,
@@ -364,6 +409,7 @@ pub async fn download_range_managed(
     mut on_progress: impl FnMut(u64) -> Result<(), AppError>,
 ) -> Result<u64, AppError> {
     let RangeRequest {
+        effective_url,
         url,
         dest,
         range,
@@ -417,6 +463,12 @@ pub async fn download_range_managed(
         _ = cancel.cancelled() => return Err(canceled()),
         result = tokio::time::timeout(timeouts.headers, request.send()) => result.map_err(|_| network_deadline("The server did not send response headers in time. Check your connection and retry."))?.map_err(map_reqwest_err)?,
     };
+    if effective_url.is_some_and(|u| u != response.url().as_str()) {
+        return Err(AppError::new(
+            ErrorCode::ResourceChanged,
+            "The range response came from a different source. Keep the partial and add a fresh download.",
+        ));
+    }
     match response.status() {
         StatusCode::OK => {
             return Err(AppError::new(
@@ -477,6 +529,8 @@ pub async fn download_range_managed(
             };
             let Some(chunk) = next else { break };
             let chunk = chunk.map_err(map_reqwest_err)?;
+            cancel.record_bytes(chunk.len());
+            cancel.throttle(chunk.len()).await?;
             let next_written = written
                 .checked_add(chunk.len() as u64)
                 .ok_or_else(|| AppError::new(ErrorCode::LengthMismatch, "File size overflow"))?;
@@ -678,6 +732,8 @@ async fn transfer(
         };
         let Some(chunk) = next else { break };
         let chunk = chunk.map_err(map_reqwest_err)?;
+            cancel.record_bytes(chunk.len());
+            cancel.throttle(chunk.len()).await?;
         let next_written = written
             .checked_add(chunk.len() as u64)
             .ok_or_else(|| AppError::new(ErrorCode::LengthMismatch, "File size overflow"))?;
@@ -870,6 +926,7 @@ mod tests {
             &url,
             &path,
             ResumeMetadata {
+                effective_url: None,
                 offset: 5,
                 etag: Some("\"same\"".into()),
             },
@@ -897,6 +954,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn changed_source_with_identical_etag_preserves_partial() {
+        let (url, server) = serve(b"HTTP/1.1 206 Partial Content\r\nETag: \"same\"\r\nContent-Range: bytes 5-10/11\r\nContent-Length: 6\r\nConnection: close\r\n\r\n world".to_vec(), false).await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.part");
+        tokio::fs::write(&path, b"hello").await.unwrap();
+        let (_tx, cancel) = cancel_pair();
+        let result = download_to_file(
+            &Client::new(),
+            &url,
+            &path,
+            ResumeMetadata {
+                offset: 5,
+                etag: Some("\"same\"".into()),
+                effective_url: Some("https://previous.example/file".into()),
+            },
+            &cancel,
+            |_| panic!("changed source must not be accepted"),
+            |_| {},
+        )
+        .await;
+        assert_eq!(result.unwrap_err().code, ErrorCode::ResourceChanged);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn invalid_resume_responses_never_modify_the_partial_file() {
         for headers in [
             "ETag: \"same\"\r\nContent-Range: bytes 0-5/6\r\n",
@@ -919,6 +1002,7 @@ mod tests {
                 &url,
                 &path,
                 ResumeMetadata {
+                    effective_url: None,
                     offset: 5,
                     etag: Some("\"same\"".into()),
                 },
@@ -944,7 +1028,11 @@ mod tests {
                 &Client::new(),
                 "http://127.0.0.1:1/fixture",
                 &path,
-                ResumeMetadata { offset: 4, etag },
+                ResumeMetadata {
+                    offset: 4,
+                    etag,
+                    effective_url: None,
+                },
                 &cancel,
                 |_| Ok(()),
                 |_| {},
@@ -1260,11 +1348,18 @@ mod tests {
                 .accept(socket)
                 .await;
         });
-        let error = Client::new()
-            .get(format!("https://{address}/file?signature=private"))
-            .send()
-            .await
-            .unwrap_err();
+        let error = crate::infrastructure::network::configured_client(
+            &crate::domain::advanced::NetworkSettings::default(),
+            None,
+            None,
+            None,
+            true,
+        )
+        .unwrap()
+        .get(format!("https://{address}/file?signature=private"))
+        .send()
+        .await
+        .unwrap_err();
         let classified = map_reqwest_err(error);
         assert_eq!(classified.code, ErrorCode::TlsError);
         assert!(!classified.retryable);

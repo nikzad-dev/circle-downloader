@@ -4,6 +4,7 @@ import { Link, useNavigate } from '@tanstack/react-router'
 import { ExternalLink, FolderOpen } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Sheet, SheetContent, SheetDescription, SheetTitle } from '@/components/ui/sheet'
+import { TaskControls } from '@/features/advanced/task-controls'
 import { orpc } from '@/lib/orpc/client'
 import { strings } from '@/lib/ui-strings'
 import { downloadErrorMessage } from '../lib/errors'
@@ -114,6 +115,7 @@ function DetailsBody({ task }: { task: DownloadTask }) {
           </dd>
         </div>
       </dl>
+      <TaskControls task={task} />
       <div className="mt-auto flex flex-wrap items-center gap-2 border-t pt-4">
         <TaskActions task={task} />
         {(task.status === 'completed' || task.status === 'failed' || task.status === 'paused' || task.status === 'canceled') && (

@@ -30,24 +30,90 @@ impl Resolve for PublicDns {
     }
 }
 
+#[cfg(test)]
 pub fn client() -> Result<reqwest::Client, AppError> {
-    client_for(cfg!(debug_assertions))
+    configured_client(
+        &crate::domain::advanced::NetworkSettings::default(),
+        None,
+        None,
+        None,
+        cfg!(debug_assertions),
+    )
 }
+#[cfg(test)]
 fn client_for(fixtures: bool) -> Result<reqwest::Client, AppError> {
-    reqwest::Client::builder()
+    configured_client(
+        &crate::domain::advanced::NetworkSettings::default(),
+        None,
+        None,
+        None,
+        fixtures,
+    )
+}
+pub fn configured_client(
+    settings: &crate::domain::advanced::NetworkSettings,
+    proxy_secret: Option<&super::credentials::Secret>,
+    origin_secret: Option<&super::credentials::Secret>,
+    authorized_origin: Option<&str>,
+    fixtures: bool,
+) -> Result<reqwest::Client, AppError> {
+    settings.validate()?;
+    if origin_secret.is_some() && authorized_origin.is_none() {
+        return Err(AppError::new(
+            ErrorCode::UrlNotAllowed,
+            "Origin credentials require an exact origin authorization.",
+        ));
+    }
+    let origin = authorized_origin.map(str::to_owned);
+    let mut builder = reqwest::Client::builder()
         .no_proxy()
+        .connect_timeout(std::time::Duration::from_secs(
+            settings.connect_timeout_secs,
+        ))
         .dns_resolver(Arc::new(PublicDns { fixtures }))
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+        .redirect(reqwest::redirect::Policy::custom(move |attempt| {
             if attempt.previous().len() >= 5 {
                 return attempt.error("Redirect limit exceeded");
             }
-            if !redirect_allowed(attempt.url(), attempt.previous()) {
+            if !redirect_allowed(attempt.url(), attempt.previous())
+                || origin
+                    .as_ref()
+                    .is_some_and(|o| *o != attempt.url().origin().ascii_serialization())
+            {
                 return attempt.error(AddressBlocked);
             }
             attempt.follow()
-        }))
-        .build()
-        .map_err(super::errors::map_reqwest_err)
+        }));
+    if !settings.proxy_url.is_empty() {
+        let mut proxy =
+            reqwest::Proxy::all(&settings.proxy_url).map_err(super::errors::map_reqwest_err)?;
+        if let Some(secret) = proxy_secret {
+            proxy = proxy.basic_auth(&secret.username, &secret.password);
+        }
+        builder = builder.proxy(proxy);
+    }
+    if let Some(secret) = origin_secret {
+        use reqwest::header::{AUTHORIZATION, HeaderMap, HeaderValue};
+        // Build the Basic value through reqwest, which also marks authorization sensitive.
+        let request = reqwest::Client::new()
+            .get("https://example.invalid")
+            .basic_auth(&secret.username, Some(&secret.password))
+            .build()
+            .map_err(super::errors::map_reqwest_err)?;
+        let mut headers = HeaderMap::new();
+        let mut auth: HeaderValue =
+            request
+                .headers()
+                .get(AUTHORIZATION)
+                .cloned()
+                .ok_or_else(|| {
+                    AppError::new(ErrorCode::Internal, "Could not authorize this request.")
+                })?;
+        auth.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth);
+        builder = builder.default_headers(headers);
+    }
+    builder.build().map_err(super::errors::map_reqwest_err)
 }
 fn redirect_allowed(next: &url::Url, previous: &[url::Url]) -> bool {
     validate_download_url(next.as_str()).is_ok()
@@ -119,5 +185,130 @@ mod tests {
             let to = url::Url::parse(to).unwrap();
             assert!(!redirect_allowed(&to, &[from]));
         }
+    }
+}
+
+#[cfg(test)]
+mod advanced_tests {
+    use super::*;
+    use crate::domain::advanced::NetworkSettings;
+    use crate::infrastructure::credentials::Secret;
+    use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
+        net::TcpListener,
+    };
+    #[tokio::test]
+    async fn proxy_407_is_classified_without_exposing_proxy_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut buffer = [0; 8192];
+            let n = socket.read(&mut buffer).await.unwrap();
+            let request = String::from_utf8_lossy(&buffer[..n]).to_lowercase();
+            assert!(request.contains("proxy-authorization: basic "));
+            assert!(!request.contains("\r\nauthorization:"));
+            socket.write_all(b"HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await.unwrap();
+        });
+        let settings = NetworkSettings {
+            proxy_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let secret = Secret {
+            username: "scoped-user".into(),
+            password: "private-password".into(),
+        };
+        let response = configured_client(&settings, Some(&secret), None, None, true)
+            .unwrap()
+            .get("http://example.com/file?token=private-token")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::PROXY_AUTHENTICATION_REQUIRED
+        );
+        let error =
+            super::super::errors::http_status_error_with_retry_after(response.status(), None);
+        assert_eq!(error.code, ErrorCode::HttpUnauthorized);
+        assert!(!error.retryable);
+        let text = serde_json::to_string(&error).unwrap();
+        assert!(!text.contains("private"));
+        assert!(!text.contains("scoped-user"));
+        fixture.await.unwrap();
+    }
+    #[tokio::test]
+    async fn proxy_connection_failure_is_redacted_and_scoped_headers_never_reach_a_redirect() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let settings = NetworkSettings {
+            proxy_url: format!("http://{address}"),
+            ..Default::default()
+        };
+        let e = configured_client(&settings, None, None, None, true)
+            .unwrap()
+            .get("https://example.com/file?secret=private")
+            .send()
+            .await
+            .unwrap_err();
+        let e = super::super::errors::map_reqwest_err(e);
+        assert_eq!(e.code, ErrorCode::NetworkConnection);
+        assert!(!e.message.contains("private"));
+        assert!(!e.message.contains(&address.to_string()));
+        let source = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_address = source.local_addr().unwrap();
+        let sink = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sink_address = sink.local_addr().unwrap();
+        let fixture = tokio::spawn(async move {
+            let (mut socket, _) = source.accept().await.unwrap();
+            let mut buf = [0; 4096];
+            let n = socket.read(&mut buf).await.unwrap();
+            assert!(
+                String::from_utf8_lossy(&buf[..n])
+                    .to_lowercase()
+                    .contains("\r\nauthorization: basic ")
+            );
+            socket.write_all(format!("HTTP/1.1 302 Found\r\nLocation: http://{sink_address}/file\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let secret = Secret {
+            username: "private-user".into(),
+            password: "private-password".into(),
+        };
+        // Loopback HTTP is used only by the transport fixture. Production grants require HTTPS.
+        let origin = format!("http://{source_address}");
+        let e = configured_client(
+            &NetworkSettings::default(),
+            None,
+            Some(&secret),
+            Some(&origin),
+            true,
+        )
+        .unwrap()
+        .get(format!("{origin}/file"))
+        .send()
+        .await
+        .unwrap_err();
+        assert_eq!(
+            super::super::errors::map_reqwest_err(e).code,
+            ErrorCode::UrlNotAllowed
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(100), sink.accept())
+                .await
+                .is_err()
+        );
+        fixture.await.unwrap();
+    }
+    #[test]
+    fn credentials_without_explicit_origin_are_rejected() {
+        let secret = Secret {
+            username: "user".into(),
+            password: "private".into(),
+        };
+        assert!(
+            configured_client(&NetworkSettings::default(), None, Some(&secret), None, true)
+                .is_err()
+        );
     }
 }

@@ -58,15 +58,15 @@ export function TaskActions({ task }: { task: DownloadTask }) {
   }
   return (
     <div className="flex items-center justify-end gap-1" aria-label={`Actions for ${task.fileName}`}>
-      {([['pause', Pause, 'Pause'], ['resume', Play, 'Resume'], ['retry', RotateCcw, 'Retry'], ['cancel', X, 'Cancel']] as const).map(([action, Icon, label]) => allowed[action] && <Button key={action} variant="ghost" size="icon-sm" title={label} aria-label={`${label} ${task.fileName}`} disabled={mutation.isPending} onClick={() => void act(action)}><Icon aria-hidden="true" /></Button>)}
+      {([['pause', Pause, 'Pause'], ['resume', Play, 'Resume'], ['retry', RotateCcw, 'Retry'], ['cancel', X, 'Cancel']] as const).map(([action, Icon, label]) => allowed[action] && <Button key={action} variant="ghost" size="icon-sm" title={label} aria-label={`${label} ${task.fileName}`} disabled={mutation.isPending} onClick={() => void act(action)}><Icon className="size-4" aria-hidden="true" /></Button>)}
       {task.status === 'completed' && (
         <Button variant="ghost" size="icon-sm" title="Open file" aria-label={`Open ${task.fileName}`} onClick={() => void openOrReveal('open')}>
-          <ExternalLink aria-hidden="true" />
+          <ExternalLink className="size-4" aria-hidden="true" />
         </Button>
       )}
       {['completed', 'failed', 'paused', 'canceled'].includes(task.status) && (
         <Button variant="ghost" size="icon-sm" title="Reveal folder" aria-label={`Reveal folder for ${task.fileName}`} onClick={() => void openOrReveal('reveal')}>
-          <FolderOpen aria-hidden="true" />
+          <FolderOpen className="size-4" aria-hidden="true" />
         </Button>
       )}
       <Button
@@ -82,7 +82,7 @@ export function TaskActions({ task }: { task: DownloadTask }) {
           setConfirm(true)
         }}
       >
-        <Trash2 aria-hidden="true" />
+        <Trash2 className="size-4" aria-hidden="true" />
       </Button>
       <AlertDialog
         open={confirm}

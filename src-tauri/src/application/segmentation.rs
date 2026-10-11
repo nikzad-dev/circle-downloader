@@ -95,6 +95,9 @@ pub async fn download_with_optional_segmentation(
             total_bytes: Some(total),
             etag: Some(etag.into()),
             last_modified: task.last_modified.clone(),
+            effective_url: db
+                .download_source(&task.id)?
+                .unwrap_or_else(|| task.url.clone()),
         })?;
         return run_segments(
             SegmentRun {
@@ -127,6 +130,7 @@ pub async fn download_with_optional_segmentation(
             total_bytes: Some(capability.total_bytes),
             etag: Some(capability.etag.clone()),
             last_modified: capability.last_modified.clone(),
+            effective_url: capability.effective_url.clone(),
         })?;
         db.replace_segments(&segments)?; // Plan and mode commit atomically before workers.
         task.transfer_mode = TransferMode::Segmented;
@@ -155,6 +159,9 @@ pub async fn download_with_optional_segmentation(
         &task.url,
         temp_path,
         ResumeMetadata {
+            effective_url: db
+                .download_source(&task.id)?
+                .or_else(|| (offset > 0).then(|| task.url.clone())),
             offset,
             etag: task.etag.clone(),
         },
@@ -211,7 +218,8 @@ async fn run_segments(
     let started = Instant::now();
     let initial: u64 = progress.lock().iter().sum();
     let slots = Semaphore::new(run.connections.clamp(1, 4) as usize);
-    let (stop, child_cancel) = cancel_pair();
+    let (stop, mut child_cancel) = cancel_pair();
+    child_cancel.inherit_limits(run.cancel);
     let mut jobs = FuturesUnordered::new();
     for segment in run.segments {
         let run = &run;
@@ -284,9 +292,11 @@ async fn run_one_segment(
         SegmentStatus::Active,
     )?;
     progress.lock()[segment.segment_index as usize] = actual;
+    let effective_url = run.db.download_source(&run.task.id)?;
     let result = download_range_managed(
         (run.client, run.files),
         RangeRequest {
+            effective_url: effective_url.as_deref(),
             url: &run.task.url,
             dest: &path,
             range: ByteRange {

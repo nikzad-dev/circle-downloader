@@ -12,3 +12,6 @@ pub use task::{
     ProgressEvent, Queue, RemoveDownloadRequest, RemoveDownloadResult, SegmentStatus, Settings,
     TaskError, TransferMode, UpdateSettingsRequest,
 };
+
+pub mod advanced;
+pub mod category;

@@ -8,6 +8,7 @@ import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { toast } from '@/components/ui/toast'
+import { NetworkPreferences } from '@/features/advanced/network-settings'
 import { downloadErrorMessage } from '@/features/downloads/lib/errors'
 import { orpc } from '@/lib/orpc/client'
 import { strings } from '@/lib/ui-strings'
@@ -66,13 +67,10 @@ export function SettingsPage() {
   const effectiveConnections = connections ?? settings.data?.maxConnectionsPerDownload ?? 1
 
   return (
-    <section className="max-w-2xl space-y-6">
-      <div>
-        <p className="mb-2 text-xs font-semibold tracking-widest text-muted-foreground uppercase">Preferences</p>
-        <h1 className="font-heading text-3xl font-semibold tracking-tight">{strings.settings}</h1>
-      </div>
+    <section className="grid items-start gap-3 lg:grid-cols-2 xl:grid-cols-3">
+      <h1 className="sr-only">{strings.settings}</h1>
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>General</CardTitle>
           <CardDescription>Appearance and window behavior.</CardDescription>
@@ -83,10 +81,10 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>Downloads</CardTitle>
-          <CardDescription>Engine-backed transfer preferences.</CardDescription>
+          <CardDescription>Transfer preferences.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-5">
           {(settings.isError || destinations.isError) && (
@@ -181,10 +179,10 @@ export function SettingsPage() {
         </CardContent>
       </Card>
 
-      <Card>
+      <Card size="sm">
         <CardHeader>
           <CardTitle>Approved folders</CardTitle>
-          <CardDescription>Opaque grants resolved only in Rust.</CardDescription>
+          <CardDescription>Choose where downloads can be saved.</CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
           <Button size="sm" disabled={grant.isPending} onClick={() => void grant.mutateAsync()}>
@@ -207,6 +205,7 @@ export function SettingsPage() {
           </ul>
         </CardContent>
       </Card>
+      <NetworkPreferences />
     </section>
   )
 }

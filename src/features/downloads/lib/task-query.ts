@@ -1,5 +1,7 @@
+import type { TaskOptions } from '@/features/advanced/api'
 import type { DownloadStatus, DownloadTask } from '@/lib/orpc/schemas'
 import { z } from 'zod'
+import { resolvedCategory } from '@/features/advanced/categories'
 import { downloadStatusSchema } from '@/lib/orpc/schemas'
 
 export const downloadsSortSchema = z.enum([
@@ -12,6 +14,9 @@ export const downloadsSortSchema = z.enum([
 
 export const downloadsSearchSchema = z.object({
   q: z.string().optional().catch(undefined),
+  queueId: z.string().optional().catch(undefined),
+  category: z.string().optional().catch(undefined),
+  tag: z.string().optional().catch(undefined),
   status: downloadStatusSchema.or(z.literal('all')).optional().catch('all'),
   sort: downloadsSortSchema.optional().catch('created_asc'),
 })
@@ -33,12 +38,20 @@ const statusRank: Record<DownloadStatus, number> = {
 export function filterAndSortTasks(
   tasks: DownloadTask[],
   search: DownloadsSearch,
+  options?: Map<string, TaskOptions>,
 ): DownloadTask[] {
   const q = search.q?.trim().toLowerCase() ?? ''
   const status = search.status ?? 'all'
   const sort = search.sort ?? 'created_asc'
 
   const filtered = tasks.filter((task) => {
+    const controls = options?.get(task.id)
+    if (search.queueId !== undefined && search.queueId !== '' && (controls?.queueId ?? 'default') !== search.queueId)
+      return false
+    if (search.category !== undefined && search.category !== '' && (resolvedCategory(task.fileName, controls)) !== search.category)
+      return false
+    if (search.tag !== undefined && search.tag !== '' && !controls?.tags.includes(search.tag))
+      return false
     if (status !== 'all' && task.status !== status)
       return false
     if (!q)

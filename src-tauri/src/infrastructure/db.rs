@@ -8,7 +8,9 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 7;
+#[path = "advanced_db.rs"]
+mod advanced;
 const BUSY_TIMEOUT_MS: i32 = 5000;
 
 type MigrationStep = fn(&rusqlite::Transaction<'_>) -> Result<(), AppError>;
@@ -18,6 +20,10 @@ const MIGRATIONS: &[(i64, MigrationStep)] = &[
     (3, migrate_v3_queue),
     (4, migrate_v4_destinations),
     (5, migrate_v5_segmentation),
+    (6, advanced::migrate),
+    // Early v6 builds did not include download_sources. Reapply the idempotent
+    // advanced schema in a new migration so existing databases are repaired.
+    (7, advanced::migrate),
 ];
 
 const DOWNLOAD_SELECT: &str =
@@ -174,7 +180,8 @@ impl Database {
             "{DOWNLOAD_SELECT}
                  WHERE status = 'queued'
                    AND (next_retry_at IS NULL OR next_retry_at <= ?1)
-                 ORDER BY queue_position ASC NULLS LAST, created_at ASC"
+                   AND NOT EXISTS (SELECT 1 FROM task_options o WHERE o.task_id=downloads.id AND o.scheduled_at > ?1)
+                 ORDER BY (COALESCE((SELECT priority FROM task_options o WHERE o.task_id=downloads.id),0)*120 - CAST(strftime('%s',created_at) AS INTEGER)) DESC, queue_position ASC NULLS LAST, id ASC"
         );
         let mut stmt = conn.prepare(&sql).map_err(map_db_err)?;
         let rows = stmt
@@ -189,8 +196,10 @@ impl Database {
         let conn = self.conn.lock();
         let value: Option<String> = conn
             .query_row(
-                "SELECT MIN(next_retry_at) FROM downloads
-                 WHERE status = 'queued' AND next_retry_at IS NOT NULL",
+                "SELECT MIN(wake) FROM (
+                    SELECT next_retry_at AS wake FROM downloads WHERE status='queued' AND next_retry_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                    UNION ALL SELECT o.scheduled_at AS wake FROM task_options o JOIN downloads d ON d.id=o.task_id WHERE d.status='queued' AND o.scheduled_at > strftime('%Y-%m-%dT%H:%M:%f+00:00','now')
+                 )",
                 [],
                 |row| row.get(0),
             )
@@ -315,7 +324,8 @@ impl Database {
     }
 
     pub fn remove_download(&self, id: &str) -> Result<(), AppError> {
-        let conn = self.conn.lock();
+        let mut conn = self.conn.lock();
+        let conn = conn.transaction().map_err(map_db_err)?;
         conn.execute(
             "DELETE FROM download_segments WHERE task_id = ?1",
             params![id],
@@ -330,7 +340,11 @@ impl Database {
                 format!("Download not found: {id}"),
             ));
         }
-        Ok(())
+        conn.execute("DELETE FROM task_options WHERE task_id=?1", [id])
+            .map_err(map_db_err)?;
+        conn.execute("DELETE FROM download_sources WHERE task_id=?1", [id])
+            .map_err(map_db_err)?;
+        conn.commit().map_err(map_db_err)
     }
 
     pub fn replace_segments(&self, segments: &[DownloadSegment]) -> Result<(), AppError> {
@@ -936,6 +950,13 @@ mod migration_tests {
             DROP INDEX IF EXISTS idx_download_segments_task;
             DROP TABLE IF EXISTS download_segments;
             DROP TABLE IF EXISTS destinations;
+            DROP TABLE IF EXISTS task_options;
+            DROP TABLE IF EXISTS download_sources;
+            DROP TABLE IF EXISTS queue_policies;
+            DROP TABLE IF EXISTS network_settings;
+            DROP TABLE IF EXISTS credential_grants;
+            DROP TABLE IF EXISTS transfer_measurements;
+            DROP INDEX IF EXISTS idx_runnable;
             ALTER TABLE downloads DROP COLUMN expected_sha256;
             ALTER TABLE downloads DROP COLUMN actual_sha256;
             ALTER TABLE downloads DROP COLUMN checksum_result;
@@ -953,7 +974,7 @@ mod migration_tests {
         drop(db);
         for _ in 0..2 {
             let db = Database::open(&path).unwrap();
-            assert_eq!(db.schema_version().unwrap(), 5);
+            assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
             let task = db.get_download("legacy").unwrap();
             assert_eq!(task.file_name, "file");
             assert!(task.actual_sha256.is_none());
@@ -972,6 +993,36 @@ mod migration_tests {
                 .unwrap();
             assert_eq!(journal.to_lowercase(), "wal");
         }
+        assert!(backup_path(&path).exists());
+    }
+
+    #[test]
+    fn v6_without_download_sources_is_repaired_and_can_remove_downloads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("early-v6.db");
+        let db = Database::open(&path).unwrap();
+        db.conn.lock().execute_batch(
+            "DROP TABLE download_sources;
+             DELETE FROM schema_migrations WHERE version > 6;
+             INSERT INTO downloads(id,url,file_name,destination_id,status,created_at,updated_at)
+             VALUES('legacy','https://example.com/file','file','default','canceled','2026-10-10T00:00:00Z','2026-10-10T00:00:00Z');",
+        ).unwrap();
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
+        assert_eq!(
+            db.get_download("legacy").unwrap().status,
+            DownloadStatus::Canceled
+        );
+        assert_eq!(db.download_source("legacy").unwrap(), None);
+        db.remove_download("legacy").unwrap();
+        assert_eq!(
+            db.get_download("legacy").unwrap_err().code,
+            ErrorCode::TaskNotFound
+        );
+        drop(db);
+        let db = Database::open(&path).unwrap();
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert!(backup_path(&path).exists());
     }
 
@@ -1037,10 +1088,10 @@ mod segmentation_tests {
         let db = Database::open(&path).unwrap();
         db.upsert_download(&super::tests::sample_task("v4"))
             .unwrap();
-        db.conn.lock().execute_batch("DROP TABLE download_segments; ALTER TABLE downloads DROP COLUMN transfer_mode; ALTER TABLE settings DROP COLUMN max_connections_per_download; DELETE FROM schema_migrations WHERE version=5;").unwrap();
+        db.conn.lock().execute_batch("DROP TABLE download_segments; ALTER TABLE downloads DROP COLUMN transfer_mode; ALTER TABLE settings DROP COLUMN max_connections_per_download; DELETE FROM schema_migrations WHERE version>=5;").unwrap();
         drop(db);
         let db = Database::open(&path).unwrap();
-        assert_eq!(db.schema_version().unwrap(), 5);
+        assert_eq!(db.schema_version().unwrap(), SCHEMA_VERSION);
         assert_eq!(
             db.get_download("v4").unwrap().transfer_mode,
             TransferMode::Single

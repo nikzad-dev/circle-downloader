@@ -95,6 +95,10 @@ pub fn http_status_error_with_retry_after(
             ErrorCode::HttpUnauthorized,
             "This link requires sign-in. Obtain a direct download link.",
         ),
+        StatusCode::PROXY_AUTHENTICATION_REQUIRED => (
+            ErrorCode::HttpUnauthorized,
+            "The proxy requires authorization. Check its scoped credential grant in Settings.",
+        ),
         StatusCode::FORBIDDEN => (
             ErrorCode::HttpForbidden,
             "The server denied access. Check the link and its permissions.",

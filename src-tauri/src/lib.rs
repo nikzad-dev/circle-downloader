@@ -57,6 +57,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .manage(commands::download_window::DownloadWindowState::default())
         .setup(move |app| {
             let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
             let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
@@ -86,7 +87,19 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let WindowEvent::CloseRequested { api, .. } = event {
+            if window.label() == "add-download"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
+                api.prevent_close();
+                let state = window.state::<commands::download_window::DownloadWindowState>();
+                let _ = commands::download_window::close_download_window(
+                    window.app_handle().clone(),
+                    state,
+                );
+            }
+            if window.label() == "main"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
                 // Hide-to-tray: closing the window must not kill transfers.
                 api.prevent_close();
                 let _ = window.hide();
@@ -94,6 +107,22 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system::health_check,
+            commands::download_window::open_download_window,
+            commands::download_window::prepare_download_window,
+            commands::download_window::download_window_ready,
+            commands::download_window::close_download_window,
+            commands::advanced::create_configured_download,
+            commands::advanced::get_task_options,
+            commands::advanced::update_task_options,
+            commands::advanced::get_queue_policies,
+            commands::advanced::save_queue_policy,
+            commands::advanced::get_network_settings,
+            commands::advanced::save_network_settings,
+            commands::advanced::list_credential_grants,
+            commands::advanced::save_credential,
+            commands::advanced::revoke_credential,
+            commands::advanced::get_statistics,
+            commands::advanced::bulk_import,
             commands::downloads::list_downloads,
             commands::downloads::get_download,
             commands::downloads::create_download,

@@ -57,12 +57,12 @@ export function DownloadsTable({
             <Link
               to="/downloads/$downloadId"
               params={{ downloadId: row.original.id }}
-              className="max-w-44 truncate font-medium underline-offset-4 hover:underline lg:max-w-80"
+              className="block max-w-44 truncate font-medium underline-offset-4 hover:underline lg:max-w-80"
               title={row.original.fileName}
             >
               {row.original.fileName}
             </Link>
-            <Badge variant={row.original.status === 'failed' ? 'destructive' : 'secondary'} className="mt-2">{statusLabels[row.original.status]}</Badge>
+            <Badge variant={row.original.status === 'failed' ? 'destructive' : 'secondary'} className="mt-1 text-[10px]">{statusLabels[row.original.status]}</Badge>
             {row.original.actualSha256 !== null && (
               <div className="mt-2 max-w-64 text-xs text-muted-foreground">
                 <p>{row.original.checksumResult === 'matched' ? 'SHA-256 verified' : row.original.checksumResult === 'mismatch' ? 'SHA-256 mismatch' : 'SHA-256 calculated · no expected checksum'}</p>
@@ -113,7 +113,7 @@ export function DownloadsTable({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 96,
+    estimateSize: () => 76,
     overscan: 8,
     enabled: virtualize,
   })
@@ -140,7 +140,7 @@ export function DownloadsTable({
             return (
               <TableRow key={row.id} data-state={row.getIsSelected() ? 'selected' : undefined} data-index={item.index} ref={virtualizer.measureElement}>
                 {row.getAllCells().map(cell => (
-                  <TableCell key={cell.id} className="py-5">
+                  <TableCell key={cell.id} className="py-3">
                     <table.FlexRender cell={cell} />
                   </TableCell>
                 ))}
@@ -157,7 +157,7 @@ export function DownloadsTable({
           {rows.map(row => (
             <TableRow key={row.id} data-state={row.getIsSelected() ? 'selected' : undefined}>
               {row.getAllCells().map(cell => (
-                <TableCell key={cell.id} className="py-5">
+                <TableCell key={cell.id} className="py-3">
                   <table.FlexRender cell={cell} />
                 </TableCell>
               ))}
@@ -174,7 +174,7 @@ export function DownloadsTable({
           {table.getHeaderGroups().map(group => (
             <TableRow key={group.id}>
               {group.headers.map(header => (
-                <TableHead key={header.id} scope="col" className={header.column.id === 'actions' ? 'text-right' : undefined}>
+                <TableHead key={header.id} scope="col" className={header.column.id === 'actions' ? 'h-9 text-right' : 'h-9'}>
                   <table.FlexRender header={header} />
                 </TableHead>
               ))}

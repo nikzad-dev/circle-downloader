@@ -18,13 +18,15 @@ use crate::infrastructure::ownership::DataDirectoryLease;
 use crate::ipc::progress::ProgressHub;
 use chrono::Utc;
 use parking_lot::Mutex;
-use reqwest::Client;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::watch;
 use uuid::Uuid;
+
+#[path = "advanced_management.rs"]
+pub mod advanced;
 
 struct WorkerHandle {
     cancel_tx: watch::Sender<bool>,
@@ -42,7 +44,10 @@ struct ManagerInner {
     download_dir: PathBuf,
     #[allow(dead_code)]
     files: ManagedFiles,
-    http: Client,
+    dispatch_lock: Mutex<()>,
+    last_queue: Mutex<String>,
+    global_limit: Arc<crate::infrastructure::rate_limit::RateLimiter>,
+    queue_limits: Mutex<HashMap<String, Arc<crate::infrastructure::rate_limit::RateLimiter>>>,
     progress: ProgressHub,
     workers: Mutex<HashMap<String, WorkerHandle>>,
     mutations: Mutex<()>,
@@ -59,14 +64,17 @@ impl DownloadManager {
         data_dir_lease: DataDirectoryLease,
     ) -> Result<Self, AppError> {
         let files = ManagedFiles::new(&download_dir)?;
-        let http = crate::infrastructure::network::client()?;
+        let rate = db.network_settings()?.bytes_per_second;
         Ok(Self {
             inner: Arc::new(ManagerInner {
                 db,
                 _data_dir_lease: data_dir_lease,
                 download_dir,
                 files,
-                http,
+                dispatch_lock: Mutex::new(()),
+                last_queue: Mutex::new(String::new()),
+                global_limit: Arc::new(crate::infrastructure::rate_limit::RateLimiter::new(rate)),
+                queue_limits: Mutex::new(HashMap::new()),
                 progress,
                 workers: Mutex::new(HashMap::new()),
                 mutations: Mutex::new(()),
@@ -524,6 +532,7 @@ impl DownloadManager {
     }
 
     pub fn dispatch(&self) {
+        let _dispatch = self.inner.dispatch_lock.lock();
         if self.inner.shutting_down.load(Ordering::SeqCst) {
             return;
         }
@@ -538,27 +547,59 @@ impl DownloadManager {
             Err(_) => return,
         };
 
-        for task in runnable {
-            if self.inner.shutting_down.load(Ordering::SeqCst) {
+        let policies = match self.inner.db.queue_policies() {
+            Ok(p) => p,
+            Err(_) => return,
+        };
+        let mut remaining = runnable;
+        let mut queue_ids: Vec<_> = policies
+            .iter()
+            .filter(|p| !p.paused)
+            .map(|p| p.id.clone())
+            .collect();
+        queue_ids.sort();
+        if let Some(index) = queue_ids
+            .iter()
+            .position(|id| *id == *self.inner.last_queue.lock())
+        {
+            let n = queue_ids.len();
+            queue_ids.rotate_left((index + 1) % n);
+        }
+        loop {
+            let mut admitted = false;
+            for queue_id in &queue_ids {
+                let workers = self.inner.workers.lock();
+                if workers.len() >= max_global {
+                    break;
+                }
+                let active: Vec<_> = workers
+                    .keys()
+                    .filter_map(|id| self.inner.db.get_download(id).ok())
+                    .collect();
+                let Some(policy) = policies.iter().find(|p| p.id == *queue_id) else {
+                    continue;
+                };
+                if active.iter().filter(|t| t.queue_id == *queue_id).count()
+                    >= policy.max_concurrent as usize
+                {
+                    continue;
+                }
+                let Some(index) = remaining.iter().position(|t| {
+                    t.queue_id == *queue_id
+                        && !workers.contains_key(&t.id)
+                        && active.iter().filter(|a| a.host == t.host).count() < PER_HOST_LIMIT
+                }) else {
+                    continue;
+                };
+                let task = remaining.remove(index);
+                drop(workers);
+                *self.inner.last_queue.lock() = queue_id.clone();
+                self.spawn_worker(task.id);
+                admitted = true;
+            }
+            if !admitted {
                 break;
             }
-            let workers = self.inner.workers.lock();
-            if workers.contains_key(&task.id) {
-                continue;
-            }
-            if workers.len() >= max_global {
-                break;
-            }
-            let host_active = workers
-                .keys()
-                .filter_map(|id| self.inner.db.get_download(id).ok())
-                .filter(|t| t.host == task.host)
-                .count();
-            if host_active >= PER_HOST_LIMIT {
-                continue;
-            }
-            drop(workers);
-            self.spawn_worker(task.id.clone());
         }
         self.schedule_retry_wake();
     }
@@ -569,7 +610,8 @@ impl DownloadManager {
         };
         let delay = (when - Utc::now())
             .to_std()
-            .unwrap_or(std::time::Duration::from_millis(0));
+            .unwrap_or(std::time::Duration::from_millis(0))
+            .min(std::time::Duration::from_secs(30));
         let mut slot = self.inner.retry_wake.lock();
         if let Some(handle) = slot.take() {
             handle.abort();
@@ -593,7 +635,28 @@ impl DownloadManager {
 
     fn spawn_worker(&self, task_id: String) {
         let inner = Arc::clone(&self.inner);
-        let (cancel_tx, cancel_token) = cancel_pair();
+        let (cancel_tx, mut cancel_token) = cancel_pair();
+        cancel_token.limits.push(self.inner.global_limit.clone());
+        if let Ok(task) = self.inner.db.get_download(&task_id) {
+            let rate = self
+                .inner
+                .db
+                .queue_policies()
+                .ok()
+                .and_then(|p| p.into_iter().find(|p| p.id == task.queue_id))
+                .map(|p| p.bytes_per_second)
+                .unwrap_or(0);
+            let limit = self
+                .inner
+                .queue_limits
+                .lock()
+                .entry(task.queue_id)
+                .or_insert_with(|| {
+                    Arc::new(crate::infrastructure::rate_limit::RateLimiter::new(rate))
+                })
+                .clone();
+            cancel_token.limits.push(limit);
+        }
         // Hold registry until insertion so a fast worker cannot leave a stale entry.
         let mut workers = self.inner.workers.lock();
         if workers.contains_key(&task_id) {
@@ -601,7 +664,29 @@ impl DownloadManager {
         }
         let worker_id = task_id.clone();
         let join = tauri::async_runtime::spawn(async move {
+            let measured = cancel_token.measured_bytes.clone();
+            let started = std::time::Instant::now();
             run_download_job(inner.clone(), worker_id.clone(), cancel_token).await;
+            let outcome = inner
+                .db
+                .get_download(&worker_id)
+                .map(|t| {
+                    if t.status == DownloadStatus::Completed {
+                        "completed"
+                    } else if t.error.is_some() {
+                        "failed"
+                    } else {
+                        "interrupted"
+                    }
+                })
+                .unwrap_or("interrupted");
+            let _ = inner.db.record_measurement(
+                &Uuid::new_v4().to_string(),
+                &worker_id,
+                measured.load(Ordering::Relaxed),
+                started.elapsed().as_millis().min(u64::MAX as u128) as u64,
+                outcome,
+            );
             inner.workers.lock().remove(&worker_id);
             let manager = DownloadManager { inner };
             manager.dispatch();
@@ -737,7 +822,38 @@ async fn execute_download(
         ));
     }
     let settings = inner.db.get_settings()?;
-    let max_connections = settings.max_connections_per_download;
+
+    let network = inner.db.network_settings()?;
+    let options = inner.db.task_options(task_id)?;
+    let max_connections = options
+        .connections
+        .unwrap_or(settings.max_connections_per_download);
+    let proxy_secret = network
+        .proxy_credential_id
+        .as_deref()
+        .map(|id| {
+            crate::infrastructure::credentials::load(&inner.db, id, "proxy", &network.proxy_url)
+        })
+        .transpose()?;
+    let origin_secret = options
+        .credential_id
+        .as_deref()
+        .map(|id| crate::infrastructure::credentials::load(&inner.db, id, "origin", &task.url))
+        .transpose()?;
+    let origin = url::Url::parse(&task.url)
+        .ok()
+        .map(|u| u.origin().ascii_serialization());
+    let configured = crate::infrastructure::network::configured_client(
+        &network,
+        proxy_secret.as_ref(),
+        origin_secret.as_ref(),
+        if origin_secret.is_some() {
+            origin.as_deref()
+        } else {
+            None
+        },
+        cfg!(debug_assertions),
+    )?;
     if task.transfer_mode == TransferMode::Segmented {
         let segments = inner.db.list_segments(task_id)?;
         task.downloaded_bytes = segments.iter().map(|s| s.completed_bytes).sum();
@@ -757,7 +873,7 @@ async fn execute_download(
 
     let download = download_with_optional_segmentation(
         SegmentationRequest {
-            client: &inner.http,
+            client: &configured,
             files: &files,
             db: &inner.db,
             task: &mut task,
@@ -774,6 +890,9 @@ async fn execute_download(
                     "Download canceled",
                 ));
             }
+            inner
+                .db
+                .save_download_source(task_id, &metadata.effective_url)?;
             current.etag = metadata.etag.clone();
             current.last_modified = metadata.last_modified.clone();
             current.total_bytes = metadata.total_bytes;
@@ -1173,7 +1292,6 @@ fn emit(inner: &ManagerInner, task: &DownloadTask) {
 fn enqueue_runnable(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), AppError> {
     ensure_transition(task.status, DownloadStatus::Queued)?;
     task.status = DownloadStatus::Queued;
-    task.queue_id = "default".into();
     task.queue_position = Some(inner.db.next_queue_position(&task.queue_id)?);
     if task.host.is_empty() {
         task.host = host_from_url(&task.url);

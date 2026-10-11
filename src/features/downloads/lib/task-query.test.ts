@@ -47,3 +47,32 @@ describe('filterAndSortTasks', () => {
     expect(second).toEqual(first)
   })
 })
+
+it('combines queue/category/tag filters with transfer status', () => {
+  const source = [task({ id: 'a', status: 'paused' }), task({ id: 'b', status: 'completed' }), task({ id: 'c', status: 'paused' })]
+  const controls = new Map(source.map(row => [row.id, { id: row.id, queueId: 'research', category: 'Papers', tags: row.id === 'c' ? ['other'] : ['review'], priority: 0, schedule: null, scheduledAt: null, credentialId: null }]))
+  expect(filterAndSortTasks(source, { queueId: 'research', category: 'Papers', tag: 'review', status: 'paused' }, controls).map(row => row.id)).toEqual(['a'])
+})
+
+it.skipIf(process.env.CIRCLE_BENCHMARKS !== '1')('large history repeated benchmark', () => {
+  const source = many(20_000)
+  const samples: number[] = []
+  for (let round = 0; round < 8; round++) {
+    const start = performance.now()
+    const result = filterAndSortTasks(source, { status: 'failed', sort: 'name_asc' })
+    expect(result).toHaveLength(6667)
+    const elapsed = performance.now() - start
+    if (round > 0)
+      samples.push(elapsed)
+  }
+  const sorted = [...samples].sort((a, b) => a - b)
+  const mean = samples.reduce((sum, v) => sum + v, 0) / samples.length
+  const variance = samples.reduce((sum, v) => sum + (v - mean) ** 2, 0) / (samples.length - 1)
+  console.warn(JSON.stringify({ benchmark: 'filter_sort_20000', samplesMs: samples, medianMs: sorted[3], sampleVarianceMs2: variance }))
+})
+
+it('filters automatic categories from filenames while respecting explicit overrides', () => {
+  const source = [task({ id: 'pdf', fileName: 'report.PDF' }), task({ id: 'mp3', fileName: 'song.mp3' }), task({ id: 'manual', fileName: 'movie.mp4' })]
+  const controls = new Map([['manual', { id: 'manual', queueId: 'default', category: 'Documents', tags: [], priority: 0, schedule: null, scheduledAt: null, credentialId: null }]])
+  expect(filterAndSortTasks(source, { category: 'Documents' }, controls).map(row => row.id)).toEqual(['manual', 'pdf'])
+})

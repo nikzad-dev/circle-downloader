@@ -12,7 +12,9 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DownloadsRouteImport } from './routes/downloads'
 import { Route as Health_checkRouteImport } from './routes/health_check'
+import { Route as QueuesRouteImport } from './routes/queues'
 import { Route as SettingsRouteImport } from './routes/settings'
+import { Route as StatisticsRouteImport } from './routes/statistics'
 import { Route as DownloadsDownloadIdRouteImport } from './routes/downloads.$downloadId'
 
 const IndexRoute = IndexRouteImport.update({
@@ -30,9 +32,19 @@ const Health_checkRoute = Health_checkRouteImport.update({
   path: '/health_check',
   getParentRoute: () => rootRouteImport,
 } as any)
+const QueuesRoute = QueuesRouteImport.update({
+  id: '/queues',
+  path: '/queues',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const SettingsRoute = SettingsRouteImport.update({
   id: '/settings',
   path: '/settings',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const StatisticsRoute = StatisticsRouteImport.update({
+  id: '/statistics',
+  path: '/statistics',
   getParentRoute: () => rootRouteImport,
 } as any)
 const DownloadsDownloadIdRoute = DownloadsDownloadIdRouteImport.update({
@@ -45,14 +57,18 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
+  '/statistics': typeof StatisticsRoute
   '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
+  '/statistics': typeof StatisticsRoute
   '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRoutesById {
@@ -60,7 +76,9 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
+  '/statistics': typeof StatisticsRoute
   '/downloads/$downloadId': typeof DownloadsDownloadIdRoute
 }
 export interface FileRouteTypes {
@@ -69,21 +87,27 @@ export interface FileRouteTypes {
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/queues'
     | '/settings'
+    | '/statistics'
     | '/downloads/$downloadId'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/queues'
     | '/settings'
+    | '/statistics'
     | '/downloads/$downloadId'
   id:
     | '__root__'
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/queues'
     | '/settings'
+    | '/statistics'
     | '/downloads/$downloadId'
   fileRoutesById: FileRoutesById
 }
@@ -91,7 +115,9 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DownloadsRoute: typeof DownloadsRouteWithChildren
   Health_checkRoute: typeof Health_checkRoute
+  QueuesRoute: typeof QueuesRoute
   SettingsRoute: typeof SettingsRoute
+  StatisticsRoute: typeof StatisticsRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -117,11 +143,25 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof Health_checkRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/queues': {
+      id: '/queues'
+      path: '/queues'
+      fullPath: '/queues'
+      preLoaderRoute: typeof QueuesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/settings': {
       id: '/settings'
       path: '/settings'
       fullPath: '/settings'
       preLoaderRoute: typeof SettingsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/statistics': {
+      id: '/statistics'
+      path: '/statistics'
+      fullPath: '/statistics'
+      preLoaderRoute: typeof StatisticsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/downloads/$downloadId': {
@@ -150,7 +190,9 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DownloadsRoute: DownloadsRouteWithChildren,
   Health_checkRoute: Health_checkRoute,
+  QueuesRoute: QueuesRoute,
   SettingsRoute: SettingsRoute,
+  StatisticsRoute: StatisticsRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
