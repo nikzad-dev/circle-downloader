@@ -2442,3 +2442,169 @@ async fn categories_are_inferred_for_existing_tasks_and_each_bulk_file_with_manu
         );
     }
 }
+
+#[tokio::test]
+async fn circle_destination_creates_category_folders_and_routes_new_downloads() {
+    use crate::domain::advanced::TaskOptions;
+    let dir = tempdir().unwrap();
+    let downloads = dir.path().join("Downloads");
+    std::fs::create_dir(&downloads).unwrap();
+    let root = downloads.join("CIRCLE");
+    let mgr = DownloadManager::new(
+        Database::open(dir.path().join("test.db")).unwrap(),
+        root.clone(),
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
+    mgr.prepare_category_folders().unwrap();
+    for category in crate::domain::category::CATEGORIES {
+        assert!(root.join(category).is_dir());
+    }
+    let input = |name: &str| CreateDownloadRequest {
+        url: format!("https://example.com/{name}"),
+        destination_id: None,
+        suggested_name: None,
+        start_now: false,
+        request_id: None,
+        expected_sha256: None,
+    };
+    let automatic = mgr.create(input("report.pdf")).unwrap();
+    assert_eq!(
+        std::path::Path::new(automatic.final_path.as_ref().unwrap())
+            .parent()
+            .unwrap(),
+        root.join("Documents")
+    );
+    let manual = mgr
+        .create_configured(
+            input("report.pdf"),
+            TaskOptions {
+                queue_id: "default".into(),
+                category: "Videos".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        std::path::Path::new(manual.final_path.as_ref().unwrap())
+            .parent()
+            .unwrap(),
+        root.join("Videos")
+    );
+    let unknown = mgr.create(input("download.bin")).unwrap();
+    assert_eq!(
+        std::path::Path::new(unknown.final_path.as_ref().unwrap())
+            .parent()
+            .unwrap(),
+        root
+    );
+    // Removing a categorized partial uses the same approved folder capability.
+    std::fs::write(automatic.temp_path.as_ref().unwrap(), b"partial").unwrap();
+    mgr.remove(RemoveDownloadRequest {
+        id: automatic.id,
+        delete_partial: true,
+    })
+    .await
+    .unwrap();
+    assert!(!std::path::Path::new(automatic.temp_path.as_ref().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn changed_default_preserves_old_partial_paths_and_removal() {
+    let (dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/old.bin".into(),
+            destination_id: None,
+            suggested_name: None,
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+    std::fs::write(task.temp_path.as_ref().unwrap(), b"keep this partial").unwrap();
+    drop(mgr);
+    let db = Database::open(dir.path().join("test.db")).unwrap();
+    db.preserve_legacy_downloads(&dir.path().join("downloads"))
+        .unwrap();
+    db.preserve_legacy_downloads(&dir.path().join("downloads"))
+        .unwrap();
+    let root = dir.path().join("CIRCLE");
+    let mgr = DownloadManager::new(
+        db,
+        root,
+        ProgressHub::default(),
+        DataDirectoryLease::acquire(dir.path()).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(mgr.get(&task.id).unwrap().temp_path, task.temp_path);
+    assert_eq!(mgr.get(&task.id).unwrap().destination_id, "circle-legacy");
+    assert_eq!(
+        std::fs::read(task.temp_path.as_ref().unwrap()).unwrap(),
+        b"keep this partial"
+    );
+    mgr.remove(RemoveDownloadRequest {
+        id: task.id,
+        delete_partial: true,
+    })
+    .await
+    .unwrap();
+    assert!(!std::path::Path::new(task.temp_path.as_ref().unwrap()).exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn category_folder_symlink_cannot_redirect_downloads_outside_circle() {
+    let (dir, mgr) = manager();
+    let outside = tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path(), dir.path().join("downloads/Documents")).unwrap();
+    let result = mgr.create(CreateDownloadRequest {
+        url: "https://example.com/report.pdf".into(),
+        destination_id: None,
+        suggested_name: None,
+        start_now: false,
+        request_id: None,
+        expected_sha256: None,
+    });
+    assert_eq!(result.unwrap_err().code, ErrorCode::PathNotAllowed);
+    assert!(mgr.list().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(outside.path()).unwrap().count(), 0);
+}
+
+#[tokio::test]
+async fn categorized_transfer_publishes_verified_bytes_inside_its_category() {
+    let url = spawn_fixture_server(|_| (200, b"document bytes".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url,
+            destination_id: None,
+            suggested_name: Some("report.pdf".into()),
+            start_now: true,
+            request_id: None,
+            expected_sha256: Some(sha256_hex(b"document bytes")),
+        })
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(3),
+    )
+    .await;
+    let done = mgr.get(&task.id).unwrap();
+    assert_eq!(
+        std::path::Path::new(done.final_path.as_ref().unwrap())
+            .parent()
+            .unwrap(),
+        mgr.download_dir().join("Documents")
+    );
+    assert_eq!(
+        std::fs::read(done.final_path.unwrap()).unwrap(),
+        b"document bytes"
+    );
+    assert_eq!(done.checksum_result.as_deref(), Some("matched"));
+    assert!(!std::path::Path::new(task.temp_path.as_ref().unwrap()).exists());
+}

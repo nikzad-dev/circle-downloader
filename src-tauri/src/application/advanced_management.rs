@@ -41,7 +41,7 @@ impl DownloadManager {
         }
         let start = input.start_now && self.get_settings()?.auto_start;
         input.start_now = false; // Persist controls before dispatch can begin.
-        let task = self.create(input)?;
+        let task = self.create_in_category(input, &options.category)?;
         if task.status == DownloadStatus::Paused {
             options.id = task.id.clone();
             self.update_task_options(options)?;
@@ -191,14 +191,17 @@ impl DownloadManager {
             errors: vec![],
         };
         for (index, url) in urls.into_iter().enumerate() {
-            let create = self.create(CreateDownloadRequest {
-                url,
-                destination_id: None,
-                suggested_name: None,
-                start_now: false,
-                request_id: Some(format!("{}:{index}", input.batch_id)),
-                expected_sha256: None,
-            });
+            let create = self.create_in_category(
+                CreateDownloadRequest {
+                    url,
+                    destination_id: None,
+                    suggested_name: None,
+                    start_now: false,
+                    request_id: Some(format!("{}:{index}", input.batch_id)),
+                    expected_sha256: None,
+                },
+                &options.category,
+            );
             match create {
                 Ok(task) => {
                     // Retry of a partially imported batch must not reconfigure or restart existing work.

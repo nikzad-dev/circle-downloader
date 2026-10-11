@@ -60,7 +60,7 @@ function DetailsBody({ task }: { task: DownloadTask }) {
         </div>
         <div>
           <dt className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">Destination</dt>
-          <dd className="mt-1">{task.destinationId === 'default' ? 'App-managed downloads folder' : task.destinationId}</dd>
+          <dd className="mt-1">{task.destinationId === 'default' ? 'Downloads / CIRCLE' : task.destinationId.startsWith('circle-category:') ? `Downloads / CIRCLE / ${task.destinationId.slice('circle-category:'.length)}` : task.destinationId === 'circle-legacy' ? 'Previous downloads folder' : 'Approved download folder'}</dd>
         </div>
         <div>
           <dt className="text-xs font-semibold tracking-widest text-muted-foreground uppercase">Transfer</dt>

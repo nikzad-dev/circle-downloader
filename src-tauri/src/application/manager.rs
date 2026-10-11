@@ -42,7 +42,6 @@ struct ManagerInner {
     db: Database,
     _data_dir_lease: DataDirectoryLease,
     download_dir: PathBuf,
-    #[allow(dead_code)]
     files: ManagedFiles,
     dispatch_lock: Mutex<()>,
     last_queue: Mutex<String>,
@@ -93,6 +92,13 @@ impl DownloadManager {
         &self.inner.download_dir
     }
 
+    pub fn prepare_category_folders(&self) -> Result<(), AppError> {
+        for category in crate::domain::category::CATEGORIES {
+            self.inner.files.child(Path::new(category))?;
+        }
+        Ok(())
+    }
+
     pub fn reconcile_on_startup(&self) -> Result<(), AppError> {
         for mut task in self.inner.db.list_downloads()? {
             let recovery = reconcile_task(&self.inner, &mut task);
@@ -128,6 +134,14 @@ impl DownloadManager {
     }
 
     pub fn create(&self, req: CreateDownloadRequest) -> Result<DownloadTask, AppError> {
+        self.create_in_category(req, "")
+    }
+
+    fn create_in_category(
+        &self,
+        req: CreateDownloadRequest,
+        category: &str,
+    ) -> Result<DownloadTask, AppError> {
         let _mutation = self.inner.mutations.lock();
         if let Some(request_id) = req.request_id.as_deref()
             && let Some(existing) = self.inner.db.find_by_request_id(request_id)?
@@ -139,15 +153,24 @@ impl DownloadManager {
         let host = host_from_url(url.as_str());
         let expected_sha256 = crate::domain::task::normalize_sha256(req.expected_sha256)?;
         let settings = self.inner.db.get_settings()?;
-        let destination_id = req
+        let mut destination_id = req
             .destination_id
             .unwrap_or(settings.default_destination_id);
-        let dest_root = resolve_root(&self.inner, &destination_id)?;
-        let _files = ManagedFiles::new(&dest_root)?;
         let file_name = match req.suggested_name {
             Some(name) => sanitize_filename(&name)?,
             None => filename_from_url(url.as_str()),
         };
+        let inferred = crate::domain::category::from_filename(&file_name);
+        let category = if category.is_empty() {
+            &inferred
+        } else {
+            category
+        };
+        if destination_id == "default" && crate::domain::category::CATEGORIES.contains(&category) {
+            destination_id = format!("circle-category:{category}");
+        }
+        let dest_root = resolve_root(&self.inner, &destination_id)?;
+        let _files = destination_files(&self.inner, &destination_id)?;
 
         let id = Uuid::new_v4().to_string();
         let now = Utc::now();
@@ -244,7 +267,7 @@ impl DownloadManager {
             ensure_transition(task.status, DownloadStatus::Queued)?;
             if let Some(temp) = &task.temp_path {
                 let root = resolve_root(&self.inner, &task.destination_id)?;
-                let files = ManagedFiles::new(&root)?;
+                let files = destination_files(&self.inner, &task.destination_id)?;
                 let name = managed_name(&root, temp)?;
                 task.downloaded_bytes = if task.transfer_mode == TransferMode::Segmented {
                     self.inner
@@ -300,7 +323,7 @@ impl DownloadManager {
         let mut task = self.inner.db.get_download(id)?;
         if let Some(temp) = &task.temp_path {
             let root = resolve_root(&self.inner, &task.destination_id)?;
-            let files = ManagedFiles::new(&root)?;
+            let files = destination_files(&self.inner, &task.destination_id)?;
             let name = managed_name(&root, temp)?;
             task.downloaded_bytes = if task.transfer_mode == TransferMode::Segmented {
                 self.inner
@@ -372,7 +395,7 @@ impl DownloadManager {
             && let Some(temp) = &task.temp_path
         {
             let root = resolve_root(&self.inner, &task.destination_id)?;
-            let files = ManagedFiles::new(&root)?;
+            let files = destination_files(&self.inner, &task.destination_id)?;
             for segment in self.inner.db.list_segments(&task.id)? {
                 let path = segment_file_path(temp, segment.segment_index);
                 files.remove(&managed_name(&root, &path.to_string_lossy())?)?;
@@ -408,7 +431,7 @@ impl DownloadManager {
     pub fn list_destinations(&self) -> Result<Vec<Destination>, AppError> {
         let mut items = vec![Destination {
             id: "default".into(),
-            label: "App-managed downloads".into(),
+            label: "Downloads / CIRCLE".into(),
             display_path: display_path(&self.inner.download_dir),
             is_default: true,
         }];
@@ -812,7 +835,7 @@ async fn execute_download(
         .ok_or_else(|| AppError::new(ErrorCode::Internal, "Missing final path"))?;
 
     let root = resolve_root(inner, &task.destination_id)?;
-    let files = ManagedFiles::new(&root)?;
+    let files = destination_files(inner, &task.destination_id)?;
     let temp_name = managed_name(&root, &temp_path)?;
     managed_name(&root, &final_path)?;
     if task.finalization.is_some() {
@@ -1003,6 +1026,9 @@ fn resolve_root(inner: &ManagerInner, destination_id: &str) -> Result<PathBuf, A
     if destination_id == "default" {
         return Ok(inner.download_dir.clone());
     }
+    if let Some(category) = category_destination(destination_id) {
+        return Ok(inner.download_dir.join(category));
+    }
     let path = inner
         .db
         .get_destination_path(destination_id)?
@@ -1013,6 +1039,17 @@ fn resolve_root(inner: &ManagerInner, destination_id: &str) -> Result<PathBuf, A
             )
         })?;
     Ok(PathBuf::from(path))
+}
+
+fn category_destination(id: &str) -> Option<&str> {
+    id.strip_prefix("circle-category:")
+        .filter(|name| crate::domain::category::CATEGORIES.contains(name))
+}
+fn destination_files(inner: &ManagerInner, id: &str) -> Result<ManagedFiles, AppError> {
+    if let Some(category) = category_destination(id) {
+        return inner.files.child(Path::new(category));
+    }
+    ManagedFiles::new(&resolve_root(inner, id)?)
 }
 
 fn ensure_path_under_destination(
@@ -1139,7 +1176,7 @@ fn reconcile_task(inner: &ManagerInner, task: &mut DownloadTask) -> Result<(), A
         return Ok(());
     };
     let root = resolve_root(inner, &task.destination_id)?;
-    let files = ManagedFiles::new(&root)?;
+    let files = destination_files(inner, &task.destination_id)?;
     let final_name = managed_name(&root, final_path)?;
     let final_exists = files.length(&final_name)?.is_some();
     if task.finalization.is_some() {

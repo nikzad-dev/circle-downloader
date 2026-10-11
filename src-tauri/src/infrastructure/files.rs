@@ -32,6 +32,19 @@ pub struct ManagedFiles {
     dir: Dir,
 }
 impl ManagedFiles {
+    pub fn child(&self, name: &Path) -> Result<Self, AppError> {
+        Self::checked(name)?;
+        match self.dir.create_dir(name) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(error) => return Err(map_io_err(error)),
+        }
+        let dir = self
+            .dir
+            .open_dir_nofollow(name)
+            .map_err(|_| unsafe_path())?;
+        Ok(Self { dir })
+    }
     pub fn new(path: &Path) -> Result<Self, AppError> {
         let parent = Dir::open_ambient_dir(
             path.parent().ok_or_else(unsafe_path)?,

@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-const SCHEMA_VERSION: i64 = 7;
+const SCHEMA_VERSION: i64 = 8;
 #[path = "advanced_db.rs"]
 mod advanced;
 const BUSY_TIMEOUT_MS: i32 = 5000;
@@ -24,6 +24,10 @@ const MIGRATIONS: &[(i64, MigrationStep)] = &[
     // Early v6 builds did not include download_sources. Reapply the idempotent
     // advanced schema in a new migration so existing databases are repaired.
     (7, advanced::migrate),
+    (8, |tx| {
+        tx.execute_batch("UPDATE settings SET default_destination_id='default' WHERE id=1")
+            .map_err(map_db_err)
+    }),
 ];
 
 const DOWNLOAD_SELECT: &str =
@@ -540,6 +544,33 @@ impl Database {
             .collect::<Result<Vec<_>, _>>()
             .map_err(map_db_err)?;
         Ok(rows)
+    }
+
+    /// Bind old default tasks to their original folder before changing the default.
+    pub fn preserve_legacy_downloads(&self, root: &Path) -> Result<(), AppError> {
+        let ids: Vec<String> = self
+            .list_downloads()?
+            .into_iter()
+            .filter(|task| {
+                task.destination_id == "default"
+                    && task
+                        .final_path
+                        .as_deref()
+                        .or(task.temp_path.as_deref())
+                        .is_some_and(|path| Path::new(path).parent() == Some(root))
+            })
+            .map(|task| task.id)
+            .collect();
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let mut conn = self.conn.lock();
+        let tx = conn.transaction().map_err(map_db_err)?;
+        tx.execute("INSERT OR IGNORE INTO destinations(id,label,root_path,created_at) VALUES('circle-legacy','Previous downloads',?1,?2)", params![root.to_string_lossy(), Utc::now().to_rfc3339()]).map_err(map_db_err)?;
+        for id in ids {
+            tx.execute("UPDATE downloads SET destination_id='circle-legacy',revision=revision+1 WHERE id=?1", [id]).map_err(map_db_err)?;
+        }
+        tx.commit().map_err(map_db_err)
     }
 
     pub fn insert_destination(

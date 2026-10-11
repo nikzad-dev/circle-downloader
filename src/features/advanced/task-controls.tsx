@@ -36,6 +36,7 @@ function Controls({ task, initial }: { task: DownloadTask, initial: TaskOptions 
     <div className="space-y-3 border-t pt-4">
       <h2 className="text-sm font-medium">Queue, organization and scheduling</h2>
       {active && <p className="text-xs text-muted-foreground">Pause this download before changing its controls.</p>}
+      <p className="text-xs text-muted-foreground">Category changes here organize the list; existing files stay in their current folder.</p>
       <TaskOptionsForm value={value} automaticCategory={categoryFromFilename(task.fileName) || 'Uncategorized'} onChange={setValue} disabled={pending || active} />
       {value.scheduledAt !== null && (
         <p className="text-xs text-muted-foreground">

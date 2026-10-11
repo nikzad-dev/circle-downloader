@@ -1,6 +1,15 @@
 use std::collections::HashMap;
 use std::sync::OnceLock;
 
+pub const CATEGORIES: &[&str] = &[
+    "Compressed",
+    "Documents",
+    "Music",
+    "Pictures",
+    "Programs",
+    "Videos",
+];
+
 /// One extension catalog shared with the UI. Category inference never changes files.
 pub fn from_filename(filename: &str) -> String {
     static EXTENSIONS: OnceLock<HashMap<String, String>> = OnceLock::new();

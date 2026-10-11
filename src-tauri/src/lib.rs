@@ -34,10 +34,42 @@ pub fn build_state(data_dir: PathBuf) -> Result<AppState, domain::AppError> {
     // Acquire before opening SQLite or reconciling files belonging to another process.
     let lease = DataDirectoryLease::acquire(&data_dir)?;
     let db = Database::open(data_dir.join("circle-downloader.db"))?;
-    let downloads = data_dir.join("downloads");
+    let downloads = default_download_dir(&data_dir)?;
+    let legacy = data_dir.join("downloads");
+    if downloads != legacy {
+        db.preserve_legacy_downloads(&legacy)?;
+    }
     let manager = DownloadManager::new(db, downloads, ProgressHub::default(), lease)?;
+    #[cfg(not(test))]
+    manager.prepare_category_folders()?;
     manager.reconcile_on_startup()?;
     Ok(AppState { manager })
+}
+
+fn default_download_dir(data_dir: &std::path::Path) -> Result<PathBuf, domain::AppError> {
+    // Tests and explicitly isolated debug runs must never use real user downloads.
+    #[cfg(test)]
+    return Ok(data_dir.join("downloads"));
+    #[cfg(not(test))]
+    {
+        #[cfg(debug_assertions)]
+        if std::env::var_os("CIRCLE_DOWNLOADER_DATA_DIR").is_some() {
+            let root = data_dir.join("user-downloads");
+            std::fs::create_dir_all(&root).map_err(infrastructure::errors::map_io_err)?;
+            return Ok(root.join("CIRCLE"));
+        }
+        let _ = data_dir;
+        let root = dirs::download_dir()
+            .or_else(|| dirs::home_dir().map(|home| home.join("Downloads")))
+            .ok_or_else(|| {
+                domain::AppError::new(
+                    domain::ErrorCode::StorageNotFound,
+                    "Your Downloads folder could not be located.",
+                )
+            })?;
+        std::fs::create_dir_all(&root).map_err(infrastructure::errors::map_io_err)?;
+        Ok(root.join("CIRCLE"))
+    }
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
