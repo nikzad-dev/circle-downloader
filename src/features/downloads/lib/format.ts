@@ -13,6 +13,25 @@ export function formatBytes(bytes: number | null) {
 export function formatSpeed(bytes: number) {
   return bytes > 0 ? `${formatBytes(bytes)}/s` : '—'
 }
+export function formatDate(dateString: string | null | undefined): string {
+  if (dateString === null || dateString === undefined || dateString.length === 0)
+    return '—'
+  try {
+    const date = new Date(dateString)
+    if (Number.isNaN(date.getTime()))
+      return '—'
+    return new Intl.DateTimeFormat(appLocale(), {
+      month: 'short',
+      day: 'numeric',
+      year: 'numeric',
+      hour: '2-digit',
+      minute: '2-digit',
+    }).format(date)
+  }
+  catch {
+    return '—'
+  }
+}
 export const statusLabels: Record<DownloadStatus, string> = {
   queued: 'Queued',
   connecting: 'Connecting',

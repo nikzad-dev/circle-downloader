@@ -13,23 +13,27 @@ import { downloadErrorMessage } from '../lib/errors'
 import { taskActions } from '../lib/format'
 
 type Action = 'pause' | 'resume' | 'cancel' | 'retry' | 'remove'
-export function TaskActions({ task }: { task: DownloadTask }) {
+export function TaskActions({ task, compact = false }: { task: DownloadTask, compact?: boolean }) {
   const client = useQueryClient()
   const [confirm, setConfirm] = useState(false)
   const [deletePartial, setDeletePartial] = useState(true)
   const triggerRef = useRef<HTMLButtonElement>(null)
   const keepRef = useRef<HTMLButtonElement>(null)
   const lockRef = useRef(false)
-  const mutation = useMutation({ mutationFn: async (action: Action) => {
-    if (action === 'remove') {
-      await orpc.downloads.remove.call({ id: task.id, deletePartial })
-      removeTask(client, task.id)
-    }
-    else {
-      mergeTask(client, await orpc.downloads[action].call({ id: task.id }))
-    }
-    return action
-  } })
+  const buttonSize = compact ? 'icon-xs' : 'icon-sm'
+  const iconSize = compact ? 'size-3.5' : 'size-4'
+  const mutation = useMutation({
+    mutationFn: async (action: Action) => {
+      if (action === 'remove') {
+        await orpc.downloads.remove.call({ id: task.id, deletePartial })
+        removeTask(client, task.id)
+      }
+      else {
+        mergeTask(client, await orpc.downloads[action].call({ id: task.id }))
+      }
+      return action
+    },
+  })
   const act = async (action: Action) => {
     if (lockRef.current)
       return
@@ -58,21 +62,21 @@ export function TaskActions({ task }: { task: DownloadTask }) {
   }
   return (
     <div className="flex items-center justify-end gap-1" aria-label={`Actions for ${task.fileName}`}>
-      {([['pause', Pause, 'Pause'], ['resume', Play, 'Resume'], ['retry', RotateCcw, 'Retry'], ['cancel', X, 'Cancel']] as const).map(([action, Icon, label]) => allowed[action] && <Button key={action} variant="ghost" size="icon-sm" title={label} aria-label={`${label} ${task.fileName}`} disabled={mutation.isPending} onClick={() => void act(action)}><Icon className="size-4" aria-hidden="true" /></Button>)}
+      {([['pause', Pause, 'Pause'], ['resume', Play, 'Resume'], ['retry', RotateCcw, 'Retry'], ['cancel', X, 'Cancel']] as const).map(([action, Icon, label]) => allowed[action] && <Button key={action} variant="ghost" size={buttonSize} title={label} aria-label={`${label} ${task.fileName}`} disabled={mutation.isPending} onClick={() => void act(action)}><Icon className={iconSize} aria-hidden="true" /></Button>)}
       {task.status === 'completed' && (
-        <Button variant="ghost" size="icon-sm" title="Open file" aria-label={`Open ${task.fileName}`} onClick={() => void openOrReveal('open')}>
-          <ExternalLink className="size-4" aria-hidden="true" />
+        <Button variant="ghost" size={buttonSize} title="Open file" aria-label={`Open ${task.fileName}`} onClick={() => void openOrReveal('open')}>
+          <ExternalLink className={iconSize} aria-hidden="true" />
         </Button>
       )}
       {['completed', 'failed', 'paused', 'canceled'].includes(task.status) && (
-        <Button variant="ghost" size="icon-sm" title="Reveal folder" aria-label={`Reveal folder for ${task.fileName}`} onClick={() => void openOrReveal('reveal')}>
-          <FolderOpen className="size-4" aria-hidden="true" />
+        <Button variant="ghost" size={buttonSize} title="Reveal folder" aria-label={`Reveal folder for ${task.fileName}`} onClick={() => void openOrReveal('reveal')}>
+          <FolderOpen className={iconSize} aria-hidden="true" />
         </Button>
       )}
       <Button
         ref={triggerRef}
         variant="ghost"
-        size="icon-sm"
+        size={buttonSize}
         title="Remove"
         aria-label={`Remove ${task.fileName}`}
         disabled={mutation.isPending}
@@ -82,7 +86,7 @@ export function TaskActions({ task }: { task: DownloadTask }) {
           setConfirm(true)
         }}
       >
-        <Trash2 className="size-4" aria-hidden="true" />
+        <Trash2 className={iconSize} aria-hidden="true" />
       </Button>
       <AlertDialog
         open={confirm}

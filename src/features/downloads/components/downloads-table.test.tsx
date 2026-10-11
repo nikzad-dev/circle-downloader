@@ -26,3 +26,34 @@ it('distinguishes a calculated digest from a matched expected checksum', () => {
   expect(screen.getByText('SHA-256 verified')).toBeInTheDocument()
   expect(screen.getAllByText(digest)).toHaveLength(2)
 })
+
+it('renders size, date added columns, and handles empty state', () => {
+  const client = new QueryClient()
+  const { rerender } = render(
+    <QueryClientProvider client={client}>
+      <DownloadsTable
+        showSelection
+        tasks={[
+          task({
+            id: 'task-1',
+            fileName: 'sample-doc.pdf',
+            totalBytes: 5 * 1024 * 1024,
+            createdAt: '2026-10-10T14:30:00Z',
+          }),
+        ]}
+      />
+    </QueryClientProvider>,
+  )
+
+  expect(screen.getByRole('columnheader', { name: 'Size' })).toBeInTheDocument()
+  expect(screen.getByRole('columnheader', { name: 'Date added' })).toBeInTheDocument()
+  expect(screen.getByText('5 MB')).toBeInTheDocument()
+  expect(screen.getByRole('cell', { name: /2026/ })).toBeInTheDocument()
+
+  rerender(
+    <QueryClientProvider client={client}>
+      <DownloadsTable tasks={[]} />
+    </QueryClientProvider>,
+  )
+  expect(screen.getByText('No downloads')).toBeInTheDocument()
+})

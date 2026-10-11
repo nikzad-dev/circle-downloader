@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { createFormSchema } from './create-form'
-import { formatBytes, formatSpeed, taskActions } from './format'
+import { formatBytes, formatDate, formatSpeed, taskActions } from './format'
 
 describe('download presentation', () => {
   it('formats unknown, zero, binary units and speed', () => {
@@ -10,6 +10,12 @@ describe('download presentation', () => {
     expect(formatBytes(Number.MAX_SAFE_INTEGER)).toContain('PB')
     expect(formatSpeed(0)).toBe('—')
     expect(formatSpeed(1024)).toBe('1 KB/s')
+  })
+  it('formats dates cleanly and handles invalid dates gracefully', () => {
+    expect(formatDate(null)).toBe('—')
+    expect(formatDate('')).toBe('—')
+    expect(formatDate('invalid-date')).toBe('—')
+    expect(formatDate('2026-10-10T10:00:00Z')).toContain('2026')
   })
   it('limits actions to supported transitions', () => {
     expect(taskActions('verifying')).toEqual({ pause: false, resume: false, cancel: true, retry: false })
