@@ -9,15 +9,7 @@ export function BackendStatus() {
     retry: false,
   })
 
-  if (health.isPending)
-    return <span>Checking Rust backend…</span>
-  if (health.isError)
-    return <span role="alert">Rust backend unavailable</span>
-  return (
-    <span>
-      Rust backend connected (
-      {health.data}
-      )
-    </span>
-  )
+  if (health.isPending) return <span>Checking Rust backend…</span>
+  if (health.isError) return <span role="alert">Rust backend unavailable</span>
+  return <span>Rust backend connected ({health.data})</span>
 }

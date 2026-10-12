@@ -3,23 +3,27 @@ import { appLocale } from '@/lib/ui-strings'
 
 const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB']
 export function formatBytes(bytes: number | null) {
-  if (bytes === null)
-    return 'Unknown size'
-  if (!Number.isFinite(bytes) || bytes <= 0)
-    return '0 B'
-  const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1)
+  if (bytes === null) return 'Unknown size'
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const index = Math.min(
+    Math.floor(Math.log(bytes) / Math.log(1024)),
+    units.length - 1,
+  )
   return `${new Intl.NumberFormat(appLocale(), { maximumFractionDigits: index === 0 ? 0 : 1 }).format(bytes / 1024 ** index)} ${units[index]}`
 }
 export function formatSpeed(bytes: number) {
   return bytes > 0 ? `${formatBytes(bytes)}/s` : '—'
 }
 export function formatDate(dateString: string | null | undefined): string {
-  if (dateString === null || dateString === undefined || dateString.length === 0)
+  if (
+    dateString === null ||
+    dateString === undefined ||
+    dateString.length === 0
+  )
     return '—'
   try {
     const date = new Date(dateString)
-    if (Number.isNaN(date.getTime()))
-      return '—'
+    if (Number.isNaN(date.getTime())) return '—'
     return new Intl.DateTimeFormat(appLocale(), {
       month: 'short',
       day: 'numeric',
@@ -27,8 +31,7 @@ export function formatDate(dateString: string | null | undefined): string {
       hour: '2-digit',
       minute: '2-digit',
     }).format(date)
-  }
-  catch {
+  } catch {
     return '—'
   }
 }
@@ -42,7 +45,17 @@ export const statusLabels: Record<DownloadStatus, string> = {
   failed: 'Failed',
   canceled: 'Canceled',
 }
-export const activeStatuses = new Set<DownloadStatus>(['queued', 'connecting', 'downloading', 'verifying'])
+export const activeStatuses = new Set<DownloadStatus>([
+  'queued',
+  'connecting',
+  'downloading',
+  'verifying',
+])
 export function taskActions(status: DownloadStatus) {
-  return { pause: ['queued', 'connecting', 'downloading'].includes(status), resume: status === 'paused', cancel: !['completed', 'canceled'].includes(status), retry: status === 'failed' }
+  return {
+    pause: ['queued', 'connecting', 'downloading'].includes(status),
+    resume: status === 'paused',
+    cancel: !['completed', 'canceled'].includes(status),
+    retry: status === 'failed',
+  }
 }

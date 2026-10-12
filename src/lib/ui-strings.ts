@@ -8,8 +8,10 @@ export const strings = {
   clearFilters: 'Clear filters',
   noFilterMatches: 'No downloads match these filters.',
   waitingForSlot: 'Waiting for a free download slot',
-  collisionPolicy: 'Circle never replaces an existing file. A unique name is chosen instead.',
-  quitPolicy: 'Closing the window hides Circle to the tray. Use Quit to stop transfers and exit.',
+  collisionPolicy:
+    'Circle never replaces an existing file. A unique name is chosen instead.',
+  quitPolicy:
+    'Closing the window hides Circle to the tray. Use Quit to stop transfers and exit.',
   autoStart: 'Start downloads immediately when added',
   concurrency: 'Maximum concurrent downloads',
   connectionsPerDownload: 'Connections per download',
@@ -23,7 +25,8 @@ export const strings = {
   openFile: 'Open file',
   revealFolder: 'Reveal folder',
   shortcutAdd: 'Add download',
-  interruptedHint: 'Retry to resume safely when validators still match. Add a fresh download when resume is unsafe.',
+  interruptedHint:
+    'Retry to resume safely when validators still match. Add a fresh download when resume is unsafe.',
 } as const
 
 export function appLocale(): string {

@@ -9,8 +9,23 @@ export default defineConfig({
   },
   test: {
     projects: [
-      { extends: true, test: { name: 'unit', environment: 'node', include: ['src/**/*.{test,spec}.ts'] } },
-      { extends: true, test: { name: 'ui', environment: 'jsdom', include: ['src/**/*.{test,spec}.tsx'], setupFiles: ['src/test/setup.ts'] } },
+      {
+        extends: true,
+        test: {
+          name: 'unit',
+          environment: 'node',
+          include: ['src/**/*.{test,spec}.ts'],
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: 'ui',
+          environment: 'jsdom',
+          include: ['src/**/*.{test,spec}.tsx'],
+          setupFiles: ['src/test/setup.ts'],
+        },
+      },
     ],
   },
 })

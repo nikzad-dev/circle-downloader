@@ -20,8 +20,7 @@ async function invokeCommand<T>(
 ): Promise<T> {
   try {
     return await invoke<T>(command, args)
-  }
-  catch (error) {
+  } catch (error) {
     normalizeNativeError(error)
   }
 }
@@ -77,7 +76,7 @@ export const nativeCommands = {
     return downloadTaskSchema.parse(result)
   },
 
-  removeDownload: async (input: { id: string, deletePartial?: boolean }) => {
+  removeDownload: async (input: { id: string; deletePartial?: boolean }) => {
     const parsed = removeDownloadInputSchema.parse(input)
     const result = await invokeCommand<unknown>('remove_download', {
       input: {
@@ -101,7 +100,9 @@ export const nativeCommands = {
 
   updateSettings: async (input: Partial<Settings>) => {
     const parsed = updateSettingsInputSchema.parse(input)
-    const result = await invokeCommand<unknown>('update_settings', { input: parsed })
+    const result = await invokeCommand<unknown>('update_settings', {
+      input: parsed,
+    })
     return settingsSchema.parse(result)
   },
 
@@ -115,9 +116,11 @@ export const nativeCommands = {
     return destinationSchema.array().parse(result)
   },
 
-  grantDestination: async (input: { path: string, label?: string }) => {
+  grantDestination: async (input: { path: string; label?: string }) => {
     const parsed = grantDestinationInputSchema.parse(input)
-    const result = await invokeCommand<unknown>('grant_destination', { input: parsed })
+    const result = await invokeCommand<unknown>('grant_destination', {
+      input: parsed,
+    })
     return destinationSchema.parse(result)
   },
 

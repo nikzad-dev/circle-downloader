@@ -16,8 +16,12 @@ export function ThemeSelector() {
       }}
       className="gap-2"
     >
-      {(['light', 'dark', 'system'] as const).map(value => (
-        <Label key={value} htmlFor={`${id}-${value}`} className="flex cursor-pointer items-center gap-3 py-1 text-sm capitalize">
+      {(['light', 'dark', 'system'] as const).map((value) => (
+        <Label
+          key={value}
+          htmlFor={`${id}-${value}`}
+          className="flex cursor-pointer items-center gap-3 py-1 text-sm capitalize"
+        >
           <RadioGroupItem id={`${id}-${value}`} value={value} />
           {value[0].toUpperCase() + value.slice(1)}
         </Label>

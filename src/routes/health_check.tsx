@@ -19,25 +19,15 @@ function HealthCheckPage() {
     <section className="space-y-4">
       <h1 className="sr-only">Health check</h1>
 
-      {isPending
-        ? (
-            <p>Checking Rust backend…</p>
-          )
-        : error
-          ? (
-              <p role="alert">
-                Rust backend unavailable:
-                {' '}
-                {error.message}
-              </p>
-            )
-          : (
-              <p>
-                Status:
-                {' '}
-                <span className="font-medium text-foreground">{data}</span>
-              </p>
-            )}
+      {isPending ? (
+        <p>Checking Rust backend…</p>
+      ) : error ? (
+        <p role="alert">Rust backend unavailable: {error.message}</p>
+      ) : (
+        <p>
+          Status: <span className="font-medium text-foreground">{data}</span>
+        </p>
+      )}
 
       <button
         type="button"

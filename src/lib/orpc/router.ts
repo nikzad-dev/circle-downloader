@@ -16,7 +16,9 @@ import {
 
 export const appRouter = {
   system: {
-    health: os.output(z.literal('ok')).handler(async () => nativeCommands.health()),
+    health: os
+      .output(z.literal('ok'))
+      .handler(async () => nativeCommands.health()),
   },
   downloads: {
     list: os
@@ -58,17 +60,23 @@ export const appRouter = {
       .handler(async ({ input }) => nativeCommands.revealDownload(input)),
   },
   settings: {
-    get: os.output(settingsSchema).handler(async () => nativeCommands.getSettings()),
+    get: os
+      .output(settingsSchema)
+      .handler(async () => nativeCommands.getSettings()),
     update: os
       .input(updateSettingsInputSchema)
       .output(settingsSchema)
       .handler(async ({ input }) => nativeCommands.updateSettings(input)),
   },
   queues: {
-    list: os.output(z.array(queueSchema)).handler(async () => nativeCommands.listQueues()),
+    list: os
+      .output(z.array(queueSchema))
+      .handler(async () => nativeCommands.listQueues()),
   },
   destinations: {
-    list: os.output(z.array(destinationSchema)).handler(async () => nativeCommands.listDestinations()),
+    list: os
+      .output(z.array(destinationSchema))
+      .handler(async () => nativeCommands.listDestinations()),
     grant: os
       .input(grantDestinationInputSchema)
       .output(destinationSchema)

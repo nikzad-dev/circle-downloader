@@ -18,15 +18,47 @@ describe('download presentation', () => {
     expect(formatDate('2026-10-10T10:00:00Z')).toContain('2026')
   })
   it('limits actions to supported transitions', () => {
-    expect(taskActions('verifying')).toEqual({ pause: false, resume: false, cancel: true, retry: false })
-    expect(taskActions('completed')).toEqual({ pause: false, resume: false, cancel: false, retry: false })
+    expect(taskActions('verifying')).toEqual({
+      pause: false,
+      resume: false,
+      cancel: true,
+      retry: false,
+    })
+    expect(taskActions('completed')).toEqual({
+      pause: false,
+      resume: false,
+      cancel: false,
+      retry: false,
+    })
     expect(taskActions('paused').resume).toBe(true)
     expect(taskActions('failed').retry).toBe(true)
   })
-  it.each(['https://example.com/a', 'http://localhost/a', 'http://127.0.0.1/a', 'http://[::1]/a'])('accepts supported URL %s', (url) => {
-    expect(createFormSchema.parse({ url: ` ${url} `, suggestedName: ' name.zip ', destinationId: 'default', startNow: true }).suggestedName).toBe('name.zip')
+  it.each([
+    'https://example.com/a',
+    'http://localhost/a',
+    'http://127.0.0.1/a',
+    'http://[::1]/a',
+  ])('accepts supported URL %s', (url) => {
+    expect(
+      createFormSchema.parse({
+        url: ` ${url} `,
+        suggestedName: ' name.zip ',
+        destinationId: 'default',
+        startNow: true,
+      }).suggestedName,
+    ).toBe('name.zip')
   })
-  it.each(['bad', 'http://example.com/a', 'ftp://example.com/a'])('rejects unsupported URL %s', (url) => {
-    expect(createFormSchema.safeParse({ url, suggestedName: '', destinationId: 'default', startNow: true }).success).toBe(false)
-  })
+  it.each(['bad', 'http://example.com/a', 'ftp://example.com/a'])(
+    'rejects unsupported URL %s',
+    (url) => {
+      expect(
+        createFormSchema.safeParse({
+          url,
+          suggestedName: '',
+          destinationId: 'default',
+          startNow: true,
+        }).success,
+      ).toBe(false)
+    },
+  )
 })

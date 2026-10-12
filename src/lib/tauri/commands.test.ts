@@ -70,7 +70,9 @@ describe('nativeCommands', () => {
         retryable: false,
       }),
     })
-    await expect(nativeCommands.getDownload({ id: 'missing' })).rejects.toMatchObject({
+    await expect(
+      nativeCommands.getDownload({ id: 'missing' }),
+    ).rejects.toMatchObject({
       code: 'TASK_NOT_FOUND',
     })
   })
@@ -89,7 +91,9 @@ describe('nativeCommands', () => {
   })
 
   it('listQueues parses queues', async () => {
-    invoke.mockResolvedValueOnce([{ id: 'default', name: 'Default', taskCount: 0 }])
+    invoke.mockResolvedValueOnce([
+      { id: 'default', name: 'Default', taskCount: 0 },
+    ])
     await expect(nativeCommands.listQueues()).resolves.toEqual([
       { id: 'default', name: 'Default', taskCount: 0 },
     ])

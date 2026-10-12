@@ -68,7 +68,9 @@ describe('createDownloadInputSchema', () => {
   })
 
   it('rejects invalid urls', () => {
-    expect(() => createDownloadInputSchema.parse({ url: 'not-a-url' })).toThrow()
+    expect(() =>
+      createDownloadInputSchema.parse({ url: 'not-a-url' }),
+    ).toThrow()
   })
 })
 
@@ -117,6 +119,13 @@ describe('settingsSchema', () => {
 
 describe('connection setting bounds', () => {
   it.each([0, 5, 1.5, -1])('rejects invalid connection count %s', (value) => {
-    expect(() => settingsSchema.parse({ maxConcurrentDownloads: 3, defaultDestinationId: 'default', autoStart: true, maxConnectionsPerDownload: value })).toThrow()
+    expect(() =>
+      settingsSchema.parse({
+        maxConcurrentDownloads: 3,
+        defaultDestinationId: 'default',
+        autoStart: true,
+        maxConnectionsPerDownload: value,
+      }),
+    ).toThrow()
   })
 })

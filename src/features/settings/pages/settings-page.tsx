@@ -3,7 +3,13 @@ import { open } from '@tauri-apps/plugin-dialog'
 import { useState } from 'react'
 import { ThemeSelector } from '@/components/theme/theme-selector'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+import {
+  Card,
+  CardContent,
+  CardDescription,
+  CardHeader,
+  CardTitle,
+} from '@/components/ui/card'
 import { Checkbox } from '@/components/ui/checkbox'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
@@ -21,31 +27,39 @@ export function SettingsPage() {
   const [connections, setConnections] = useState<number | null>(null)
 
   const update = useMutation({
-    mutationFn: async (input: Parameters<typeof orpc.settings.update.call>[0]) => orpc.settings.update.call(input),
+    mutationFn: async (
+      input: Parameters<typeof orpc.settings.update.call>[0],
+    ) => orpc.settings.update.call(input),
     onSuccess: async () => {
       await client.invalidateQueries({ queryKey: orpc.settings.get.key() })
       toast.add({ title: 'Settings saved', type: 'success' })
     },
     onError: (error) => {
-      toast.add({ title: 'Could not save settings', description: downloadErrorMessage(error), type: 'error' })
+      toast.add({
+        title: 'Could not save settings',
+        description: downloadErrorMessage(error),
+        type: 'error',
+      })
     },
   })
 
   const grant = useMutation({
     mutationFn: async () => {
       const selected = await open({ directory: true, multiple: false })
-      if (selected === null)
-        return null
+      if (selected === null) return null
       return orpc.destinations.grant.call({ path: selected })
     },
     onSuccess: async (result) => {
-      if (!result)
-        return
+      if (!result) return
       await client.invalidateQueries({ queryKey: orpc.destinations.list.key() })
       toast.add({ title: 'Folder approved', type: 'success' })
     },
     onError: (error) => {
-      toast.add({ title: 'Could not add folder', description: downloadErrorMessage(error), type: 'error' })
+      toast.add({
+        title: 'Could not add folder',
+        description: downloadErrorMessage(error),
+        type: 'error',
+      })
     },
   })
 
@@ -59,12 +73,18 @@ export function SettingsPage() {
       toast.add({ title: 'Folder removed', type: 'success' })
     },
     onError: (error) => {
-      toast.add({ title: 'Could not remove folder', description: downloadErrorMessage(error), type: 'error' })
+      toast.add({
+        title: 'Could not remove folder',
+        description: downloadErrorMessage(error),
+        type: 'error',
+      })
     },
   })
 
-  const effectiveConcurrency = concurrency ?? settings.data?.maxConcurrentDownloads ?? 3
-  const effectiveConnections = connections ?? settings.data?.maxConnectionsPerDownload ?? 1
+  const effectiveConcurrency =
+    concurrency ?? settings.data?.maxConcurrentDownloads ?? 3
+  const effectiveConnections =
+    connections ?? settings.data?.maxConnectionsPerDownload ?? 1
 
   return (
     <section className="grid items-start gap-3 lg:grid-cols-2 xl:grid-cols-3">
@@ -77,7 +97,9 @@ export function SettingsPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <ThemeSelector />
-          <p className="text-sm leading-relaxed text-muted-foreground">{strings.quitPolicy}</p>
+          <p className="text-sm leading-relaxed text-muted-foreground">
+            {strings.quitPolicy}
+          </p>
         </CardContent>
       </Card>
 
@@ -108,7 +130,9 @@ export function SettingsPage() {
                 <Checkbox
                   checked={settings.data.autoStart}
                   disabled={update.isPending}
-                  onCheckedChange={checked => update.mutate({ autoStart: !!checked })}
+                  onCheckedChange={(checked) =>
+                    update.mutate({ autoStart: !!checked })
+                  }
                 />
                 {strings.autoStart}
               </Label>
@@ -123,9 +147,14 @@ export function SettingsPage() {
                     className="max-w-28"
                     value={effectiveConcurrency}
                     disabled={update.isPending}
-                    onChange={event => setConcurrency(Number(event.target.value))}
+                    onChange={(event) =>
+                      setConcurrency(Number(event.target.value))
+                    }
                     onBlur={() => {
-                      const value = Math.min(32, Math.max(1, effectiveConcurrency))
+                      const value = Math.min(
+                        32,
+                        Math.max(1, effectiveConcurrency),
+                      )
                       setConcurrency(null)
                       if (value !== settings.data.maxConcurrentDownloads)
                         update.mutate({ maxConcurrentDownloads: value })
@@ -134,7 +163,9 @@ export function SettingsPage() {
                 </div>
               </div>
               <div className="space-y-2">
-                <Label htmlFor="connections">{strings.connectionsPerDownload}</Label>
+                <Label htmlFor="connections">
+                  {strings.connectionsPerDownload}
+                </Label>
                 <div className="flex items-center gap-3">
                   <Input
                     id="connections"
@@ -144,16 +175,25 @@ export function SettingsPage() {
                     className="max-w-28"
                     value={effectiveConnections}
                     disabled={update.isPending}
-                    onChange={event => setConnections(Number(event.target.value))}
+                    onChange={(event) =>
+                      setConnections(Number(event.target.value))
+                    }
                     onBlur={() => {
-                      const value = Number.isFinite(effectiveConnections) ? Math.min(4, Math.max(1, Math.trunc(effectiveConnections))) : 1
+                      const value = Number.isFinite(effectiveConnections)
+                        ? Math.min(
+                            4,
+                            Math.max(1, Math.trunc(effectiveConnections)),
+                          )
+                        : 1
                       setConnections(null)
                       if (value !== settings.data.maxConnectionsPerDownload)
                         update.mutate({ maxConnectionsPerDownload: value })
                     }}
                   />
                 </div>
-                <p className="text-xs text-muted-foreground">{strings.connectionsPerDownloadHint}</p>
+                <p className="text-xs text-muted-foreground">
+                  {strings.connectionsPerDownloadHint}
+                </p>
               </div>
               <div className="space-y-2">
                 <Label htmlFor="default-destination">Default destination</Label>
@@ -162,13 +202,19 @@ export function SettingsPage() {
                   className="h-10 w-full max-w-md border-b border-input bg-transparent text-sm outline-none"
                   value={settings.data.defaultDestinationId}
                   disabled={update.isPending || !destinations.data}
-                  onChange={event => update.mutate({ defaultDestinationId: event.target.value })}
+                  onChange={(event) =>
+                    update.mutate({ defaultDestinationId: event.target.value })
+                  }
                 >
-                  {(destinations.data ?? []).map(item => (
-                    <option key={item.id} value={item.id}>{item.label}</option>
+                  {(destinations.data ?? []).map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.label}
+                    </option>
                   ))}
                 </select>
-                <p className="text-xs text-muted-foreground">{strings.collisionPolicy}</p>
+                <p className="text-xs text-muted-foreground">
+                  {strings.collisionPolicy}
+                </p>
               </div>
               <ul className="space-y-1 text-sm text-muted-foreground">
                 <li>{strings.retriesReadonly}</li>
@@ -182,21 +228,37 @@ export function SettingsPage() {
       <Card size="sm">
         <CardHeader>
           <CardTitle>Approved folders</CardTitle>
-          <CardDescription>Choose where downloads can be saved.</CardDescription>
+          <CardDescription>
+            Choose where downloads can be saved.
+          </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
-          <Button size="sm" disabled={grant.isPending} onClick={() => void grant.mutateAsync()}>
+          <Button
+            size="sm"
+            disabled={grant.isPending}
+            onClick={() => void grant.mutateAsync()}
+          >
             {strings.addFolder}
           </Button>
           <ul className="space-y-3">
-            {(destinations.data ?? []).map(item => (
-              <li key={item.id} className="flex flex-wrap items-start justify-between gap-3 border-b pb-3 text-sm">
+            {(destinations.data ?? []).map((item) => (
+              <li
+                key={item.id}
+                className="flex flex-wrap items-start justify-between gap-3 border-b pb-3 text-sm"
+              >
                 <div className="min-w-0">
                   <p className="font-medium">{item.label}</p>
-                  <p className="break-all text-xs text-muted-foreground">{item.displayPath}</p>
+                  <p className="break-all text-xs text-muted-foreground">
+                    {item.displayPath}
+                  </p>
                 </div>
                 {!item.isDefault && (
-                  <Button size="sm" variant="outline" disabled={remove.isPending} onClick={() => remove.mutate(item.id)}>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={remove.isPending}
+                    onClick={() => remove.mutate(item.id)}
+                  >
                     Remove
                   </Button>
                 )}

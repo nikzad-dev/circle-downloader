@@ -2,18 +2,13 @@
   "compilerOptions": {
     "target": "ES2020",
     "jsx": "react-jsx",
-    "lib": [
-      "ES2020",
-      "DOM"
-    ],
+    "lib": ["ES2020", "DOM"],
     "useDefineForClassFields": true,
     "module": "ESNext",
     /* Bundler mode */
     "moduleResolution": "bundler",
     "paths": {
-      "@/*": [
-        "./src/*"
-      ]
+      "@/*": ["./src/*"]
     },
     "resolveJsonModule": true,
     "resolvePackageJsonImports": true,
@@ -32,7 +27,5 @@
       "path": "./tsconfig.node.json"
     }
   ],
-  "include": [
-    "src"
-  ]
+  "include": ["src"]
 }

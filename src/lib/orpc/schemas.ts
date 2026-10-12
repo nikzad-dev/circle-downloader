@@ -66,9 +66,20 @@ export const downloadTaskSchema = z.object({
   speedBytesPerSecond: safeByteCount,
   revision: z.number().int().nonnegative(),
   error: taskErrorSchema.nullable(),
-  expectedSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
-  actualSha256: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
-  checksumResult: z.enum(['computed', 'matched', 'mismatch']).nullable().default(null),
+  expectedSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .nullable()
+    .default(null),
+  actualSha256: z
+    .string()
+    .regex(/^[a-f0-9]{64}$/)
+    .nullable()
+    .default(null),
+  checksumResult: z
+    .enum(['computed', 'matched', 'mismatch'])
+    .nullable()
+    .default(null),
   retryCount: z.number().int().nonnegative(),
   nextRetryAt: z.string().min(1).nullable(),
   transferMode: z.enum(['single', 'segmented']).default('single'),
@@ -82,7 +93,11 @@ export const createDownloadInputSchema = z.object({
   suggestedName: z.string().min(1).optional(),
   startNow: z.boolean().optional(),
   requestId: z.string().min(1).optional(),
-  expectedSha256: z.string().trim().regex(/^[a-f0-9]{64}$/i).optional(),
+  expectedSha256: z
+    .string()
+    .trim()
+    .regex(/^[a-f0-9]{64}$/i)
+    .optional(),
 })
 
 export const downloadIdInputSchema = z.object({

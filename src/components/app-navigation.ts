@@ -1,4 +1,10 @@
-import { ArrowDownToLine, ChartNoAxesCombined, Home, ListOrdered, Settings } from 'lucide-react'
+import {
+  ArrowDownToLine,
+  ChartNoAxesCombined,
+  Home,
+  ListOrdered,
+  Settings,
+} from 'lucide-react'
 import { strings } from '@/lib/ui-strings'
 
 export const workspacePages = [

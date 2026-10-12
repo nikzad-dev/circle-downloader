@@ -46,35 +46,56 @@ export function filterAndSortTasks(
 
   const filtered = tasks.filter((task) => {
     const controls = options?.get(task.id)
-    if (search.queueId !== undefined && search.queueId !== '' && (controls?.queueId ?? 'default') !== search.queueId)
+    if (
+      search.queueId !== undefined &&
+      search.queueId !== '' &&
+      (controls?.queueId ?? 'default') !== search.queueId
+    )
       return false
-    if (search.category !== undefined && search.category !== '' && (resolvedCategory(task.fileName, controls)) !== search.category)
+    if (
+      search.category !== undefined &&
+      search.category !== '' &&
+      resolvedCategory(task.fileName, controls) !== search.category
+    )
       return false
-    if (search.tag !== undefined && search.tag !== '' && !controls?.tags.includes(search.tag))
+    if (
+      search.tag !== undefined &&
+      search.tag !== '' &&
+      !controls?.tags.includes(search.tag)
+    )
       return false
-    if (status !== 'all' && task.status !== status)
-      return false
-    if (!q)
-      return true
-    return task.fileName.toLowerCase().includes(q) || task.url.toLowerCase().includes(q)
+    if (status !== 'all' && task.status !== status) return false
+    if (!q) return true
+    return (
+      task.fileName.toLowerCase().includes(q) ||
+      task.url.toLowerCase().includes(q)
+    )
   })
 
   const sorted = [...filtered]
   sorted.sort((a, b) => {
     switch (sort) {
       case 'created_desc':
-        return b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)
+        return (
+          b.createdAt.localeCompare(a.createdAt) || a.id.localeCompare(b.id)
+        )
       case 'name_asc':
         return a.fileName.localeCompare(b.fileName) || a.id.localeCompare(b.id)
       case 'name_desc':
         return b.fileName.localeCompare(a.fileName) || a.id.localeCompare(b.id)
       case 'status_asc': {
         const byStatus = statusRank[a.status] - statusRank[b.status]
-        return byStatus || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
+        return (
+          byStatus ||
+          a.createdAt.localeCompare(b.createdAt) ||
+          a.id.localeCompare(b.id)
+        )
       }
       case 'created_asc':
       default:
-        return a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
+        return (
+          a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
+        )
     }
   })
   return sorted

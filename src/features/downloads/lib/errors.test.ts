@@ -15,11 +15,18 @@ describe('actionable transfer failures', () => {
     ['STORAGE_NOT_FOUND', 'partial file is missing'],
     ['STORAGE_ERROR', 'drive is connected'],
     ['DATA_DIRECTORY_IN_USE', 'Another Circle process'],
-  ] as const)('explains %s without displaying raw diagnostic secrets', (code, action) => {
-    const error = new NativeCommandError({ code, message: 'https://private.example/file?token=secret', retryable: false })
-    const message = downloadErrorMessage(error)
-    expect(message).toContain(action)
-    expect(message).not.toContain('secret')
-    expect(message).not.toContain('private.example')
-  })
+  ] as const)(
+    'explains %s without displaying raw diagnostic secrets',
+    (code, action) => {
+      const error = new NativeCommandError({
+        code,
+        message: 'https://private.example/file?token=secret',
+        retryable: false,
+      })
+      const message = downloadErrorMessage(error)
+      expect(message).toContain(action)
+      expect(message).not.toContain('secret')
+      expect(message).not.toContain('private.example')
+    },
+  )
 })

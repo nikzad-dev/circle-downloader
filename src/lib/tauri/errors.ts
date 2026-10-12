@@ -14,17 +14,14 @@ export class NativeCommandError extends Error {
 }
 
 export function normalizeNativeError(error: unknown): never {
-  if (error instanceof NativeCommandError)
-    throw error
+  if (error instanceof NativeCommandError) throw error
 
   if (typeof error === 'string') {
     try {
       const parsed = appErrorSchema.parse(JSON.parse(error))
       throw new NativeCommandError(parsed)
-    }
-    catch (inner) {
-      if (inner instanceof NativeCommandError)
-        throw inner
+    } catch (inner) {
+      if (inner instanceof NativeCommandError) throw inner
     }
   }
 
@@ -35,16 +32,13 @@ export function normalizeNativeError(error: unknown): never {
       try {
         const parsed = appErrorSchema.parse(JSON.parse(record.message))
         throw new NativeCommandError(parsed)
-      }
-      catch (inner) {
-        if (inner instanceof NativeCommandError)
-          throw inner
+      } catch (inner) {
+        if (inner instanceof NativeCommandError) throw inner
       }
     }
 
     const direct = appErrorSchema.safeParse(error)
-    if (direct.success)
-      throw new NativeCommandError(direct.data)
+    if (direct.success) throw new NativeCommandError(direct.data)
   }
 
   throw new NativeCommandError({

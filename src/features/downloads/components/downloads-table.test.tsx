@@ -5,7 +5,13 @@ import { task } from '@/test/fixtures'
 import { DownloadsTable } from './downloads-table'
 
 vi.mock('@tanstack/react-router', () => ({
-  Link: ({ children, ...props }: { children: React.ReactNode, to?: string }) => <a href={props.to ?? '#'}>{children}</a>,
+  Link: ({
+    children,
+    ...props
+  }: {
+    children: React.ReactNode
+    to?: string
+  }) => <a href={props.to ?? '#'}>{children}</a>,
 }))
 
 it('distinguishes a calculated digest from a matched expected checksum', () => {
@@ -16,13 +22,26 @@ it('distinguishes a calculated digest from a matched expected checksum', () => {
       <DownloadsTable
         showSelection={false}
         tasks={[
-          task({ id: 'computed', status: 'completed', actualSha256: digest, checksumResult: 'computed' }),
-          task({ id: 'matched', status: 'completed', actualSha256: digest, expectedSha256: digest, checksumResult: 'matched' }),
+          task({
+            id: 'computed',
+            status: 'completed',
+            actualSha256: digest,
+            checksumResult: 'computed',
+          }),
+          task({
+            id: 'matched',
+            status: 'completed',
+            actualSha256: digest,
+            expectedSha256: digest,
+            checksumResult: 'matched',
+          }),
         ]}
       />
     </QueryClientProvider>,
   )
-  expect(screen.getByText('SHA-256 calculated · no expected checksum')).toBeInTheDocument()
+  expect(
+    screen.getByText('SHA-256 calculated · no expected checksum'),
+  ).toBeInTheDocument()
   expect(screen.getByText('SHA-256 verified')).toBeInTheDocument()
   expect(screen.getAllByText(digest)).toHaveLength(2)
 })
@@ -46,7 +65,9 @@ it('renders size, date added columns, and handles empty state', () => {
   )
 
   expect(screen.getByRole('columnheader', { name: 'Size' })).toBeInTheDocument()
-  expect(screen.getByRole('columnheader', { name: 'Date added' })).toBeInTheDocument()
+  expect(
+    screen.getByRole('columnheader', { name: 'Date added' }),
+  ).toBeInTheDocument()
   expect(screen.getByText('5 MB')).toBeInTheDocument()
   expect(screen.getByRole('cell', { name: /2026/ })).toBeInTheDocument()
 

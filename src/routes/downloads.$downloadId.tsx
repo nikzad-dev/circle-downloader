@@ -5,9 +5,11 @@ import { downloadsSearchSchema } from '@/features/downloads/lib/task-query'
 import { DownloadsPage } from '@/features/downloads/pages/downloads-page'
 
 export const Route = createFileRoute('/downloads/$downloadId')({
-  validateSearch: search => downloadsSearchSchema.parse(search),
+  validateSearch: (search) => downloadsSearchSchema.parse(search),
   loader: ({ context }) => {
-    void context.queryClient.prefetchQuery(downloadsListOptions(context.queryClient))
+    void context.queryClient.prefetchQuery(
+      downloadsListOptions(context.queryClient),
+    )
   },
   component: DownloadDetailsRoute,
 })
@@ -15,5 +17,10 @@ export const Route = createFileRoute('/downloads/$downloadId')({
 function DownloadDetailsRoute() {
   const search = Route.useSearch()
   const { downloadId } = Route.useParams()
-  return <DownloadsPage search={search} detailsSlot={<TaskDetailsSheet downloadId={downloadId} />} />
+  return (
+    <DownloadsPage
+      search={search}
+      detailsSlot={<TaskDetailsSheet downloadId={downloadId} />}
+    />
+  )
 }

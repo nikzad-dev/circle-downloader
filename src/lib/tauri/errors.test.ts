@@ -21,8 +21,7 @@ describe('normalizeNativeError', () => {
           retryable: false,
         }),
       )
-    }
-    catch (error) {
+    } catch (error) {
       expect(error).toBeInstanceOf(NativeCommandError)
       expect((error as NativeCommandError).code).toBe('INVALID_URL')
     }
@@ -37,8 +36,7 @@ describe('normalizeNativeError', () => {
           retryable: false,
         }),
       })
-    }
-    catch (error) {
+    } catch (error) {
       expect(error).toBeInstanceOf(NativeCommandError)
       expect((error as NativeCommandError).code).toBe('UNSUPPORTED_SCHEME')
     }
@@ -47,8 +45,7 @@ describe('normalizeNativeError', () => {
   it('falls back to INTERNAL', () => {
     try {
       normalizeNativeError(new Error('boom'))
-    }
-    catch (error) {
+    } catch (error) {
       expect(error).toBeInstanceOf(NativeCommandError)
       expect((error as NativeCommandError).code).toBe('INTERNAL')
     }
