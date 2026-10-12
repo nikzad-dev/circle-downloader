@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as DownloadsRouteImport } from './routes/downloads'
 import { Route as Health_checkRouteImport } from './routes/health_check'
+import { Route as OverviewRouteImport } from './routes/overview'
 import { Route as QueuesRouteImport } from './routes/queues'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StatisticsRouteImport } from './routes/statistics'
@@ -30,6 +31,11 @@ const DownloadsRoute = DownloadsRouteImport.update({
 const Health_checkRoute = Health_checkRouteImport.update({
   id: '/health_check',
   path: '/health_check',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const OverviewRoute = OverviewRouteImport.update({
+  id: '/overview',
+  path: '/overview',
   getParentRoute: () => rootRouteImport,
 } as any)
 const QueuesRoute = QueuesRouteImport.update({
@@ -57,6 +63,7 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/overview': typeof OverviewRoute
   '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
@@ -66,6 +73,7 @@ export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/overview': typeof OverviewRoute
   '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
@@ -76,6 +84,7 @@ export interface FileRoutesById {
   '/': typeof IndexRoute
   '/downloads': typeof DownloadsRouteWithChildren
   '/health_check': typeof Health_checkRoute
+  '/overview': typeof OverviewRoute
   '/queues': typeof QueuesRoute
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
@@ -87,6 +96,7 @@ export interface FileRouteTypes {
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/overview'
     | '/queues'
     | '/settings'
     | '/statistics'
@@ -96,6 +106,7 @@ export interface FileRouteTypes {
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/overview'
     | '/queues'
     | '/settings'
     | '/statistics'
@@ -105,6 +116,7 @@ export interface FileRouteTypes {
     | '/'
     | '/downloads'
     | '/health_check'
+    | '/overview'
     | '/queues'
     | '/settings'
     | '/statistics'
@@ -115,6 +127,7 @@ export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   DownloadsRoute: typeof DownloadsRouteWithChildren
   Health_checkRoute: typeof Health_checkRoute
+  OverviewRoute: typeof OverviewRoute
   QueuesRoute: typeof QueuesRoute
   SettingsRoute: typeof SettingsRoute
   StatisticsRoute: typeof StatisticsRoute
@@ -141,6 +154,13 @@ declare module '@tanstack/react-router' {
       path: '/health_check'
       fullPath: '/health_check'
       preLoaderRoute: typeof Health_checkRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/overview': {
+      id: '/overview'
+      path: '/overview'
+      fullPath: '/overview'
+      preLoaderRoute: typeof OverviewRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/queues': {
@@ -190,6 +210,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   DownloadsRoute: DownloadsRouteWithChildren,
   Health_checkRoute: Health_checkRoute,
+  OverviewRoute: OverviewRoute,
   QueuesRoute: QueuesRoute,
   SettingsRoute: SettingsRoute,
   StatisticsRoute: StatisticsRoute,

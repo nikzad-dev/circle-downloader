@@ -8,7 +8,7 @@ import {
 import { strings } from '@/lib/ui-strings'
 
 export const workspacePages = [
-  { to: '/', label: 'Home', icon: Home },
+  { to: '/overview', label: 'Overview', icon: Home },
   { to: '/downloads', label: strings.downloads, icon: ArrowDownToLine },
   { to: '/queues', label: 'Queues', icon: ListOrdered },
   { to: '/statistics', label: 'Statistics', icon: ChartNoAxesCombined },

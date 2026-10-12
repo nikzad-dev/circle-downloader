@@ -1,4 +1,4 @@
-import { Link, Outlet } from '@tanstack/react-router'
+import { Link, Outlet, useLocation } from '@tanstack/react-router'
 import { Circle, PanelLeft, Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useDefaultLayout } from 'react-resizable-panels'
@@ -33,10 +33,12 @@ function isEditableTarget(target: EventTarget | null) {
 }
 
 export function AppShell() {
+  const { pathname } = useLocation()
+  const isDownloads = pathname === '/' || pathname.startsWith('/downloads')
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
-    id: 'circle-workspace',
+    id: 'circle-downloads-workspace',
     panelIds: ['sidebar', 'content'],
     onlySaveAfterUserInteractions: true,
   })
@@ -94,7 +96,7 @@ export function AppShell() {
           <Button
             variant="ghost"
             size="icon-sm"
-            className="hidden md:inline-flex"
+            className={isDownloads ? 'hidden md:inline-flex' : 'hidden'}
             aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
             aria-expanded={sidebarOpen}
             aria-controls="download-sidebar"
@@ -108,7 +110,7 @@ export function AppShell() {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className="md:hidden"
+                  className={isDownloads ? 'md:hidden' : 'hidden'}
                   aria-label="Show sidebar"
                 />
               }
@@ -117,7 +119,7 @@ export function AppShell() {
             </SheetTrigger>
             <SheetContent side="left" className="w-64 max-w-[85%] gap-0">
               <SheetTitle className="px-6 py-5 text-sm tracking-normal normal-case">
-                Workspace
+                Download filters
               </SheetTitle>
               <AppSidebar
                 id="mobile-download-sidebar"
@@ -158,13 +160,13 @@ export function AppShell() {
             defaultLayout={defaultLayout}
             onLayoutChanged={sidebarOpen ? onLayoutChanged : undefined}
           >
-            {sidebarOpen && (
+            {sidebarOpen && isDownloads && (
               <>
                 <ResizablePanel
                   id="sidebar"
-                  defaultSize={216}
-                  minSize={180}
-                  maxSize={320}
+                  defaultSize={188}
+                  minSize={168}
+                  maxSize={280}
                   className="hidden md:block"
                 >
                   <AppSidebar />
@@ -179,7 +181,11 @@ export function AppShell() {
               <main
                 id="main-content"
                 tabIndex={-1}
-                className="h-full min-w-0 overflow-auto p-2.5 outline-none sm:p-3"
+                className={
+                  isDownloads
+                    ? 'h-full min-w-0 overflow-hidden outline-none'
+                    : 'h-full min-w-0 overflow-auto p-4 outline-none'
+                }
               >
                 <Outlet />
               </main>

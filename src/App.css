@@ -170,3 +170,60 @@
     flex: 1 1 0 !important;
   }
 }
+
+/* A desktop download list: stable columns, quiet rules and compact rows. */
+.downloads-grid [data-slot='table-container'] {
+  overflow: visible;
+}
+.downloads-grid thead {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  background: var(--sidebar);
+  box-shadow: 0 1px 0 var(--border);
+}
+.downloads-grid th + th,
+.downloads-grid td + td {
+  border-left: 1px solid color-mix(in oklab, var(--border) 65%, transparent);
+}
+.downloads-grid tbody .download-row:nth-child(even) {
+  background: color-mix(in oklab, var(--muted) 28%, var(--card));
+}
+.downloads-grid tbody .download-row:hover {
+  background: var(--accent);
+}
+.downloads-grid tbody .download-row[data-state='selected'] {
+  background: color-mix(in oklab, var(--primary) 14%, var(--card));
+}
+[data-download-status='downloading'],
+[data-download-status='completed'] {
+  color: var(--sidebar-primary);
+}
+[data-download-status='failed'] {
+  color: var(--destructive);
+}
+[data-download-status='paused'],
+[data-download-status='queued'],
+[data-download-status='canceled'] {
+  color: var(--muted-foreground);
+}
+
+.downloads-grid {
+  container-type: inline-size;
+}
+@container (max-width: 1199px) {
+  .downloads-grid [data-column='dateAdded'],
+  .downloads-grid [data-column='description'],
+  .downloads-grid .download-date-column,
+  .downloads-grid .download-description-column {
+    display: none;
+  }
+}
+
+[data-progress-status='paused'] [data-slot='progress-indicator'],
+[data-progress-status='canceled'] [data-slot='progress-indicator'] {
+  background: var(--muted-foreground);
+}
+[data-progress-status='failed'] [data-slot='progress-indicator'] {
+  background: var(--destructive);
+}

@@ -38,7 +38,7 @@ const categories = [
 ] as const
 
 const linkClass =
-  'flex min-h-8 items-center gap-2 rounded-md px-2.5 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring [&.active]:bg-sidebar-accent [&.active]:font-medium [&.active]:text-foreground'
+  'flex min-h-8 items-center gap-2 rounded-sm px-2.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring [&.active]:bg-sidebar-accent [&.active]:font-medium [&.active]:text-foreground'
 
 export function AppSidebar({
   onNavigate,
@@ -73,11 +73,8 @@ export function AppSidebar({
   }, [controls.data, query.data])
   const { pathname } = useLocation()
   const search = useSearch({ strict: false })
-  const inDownloads = pathname.startsWith('/downloads')
+  const inDownloads = pathname === '/' || pathname.startsWith('/downloads')
   const selected = search.status ?? 'all'
-  const selectedGroup = ['completed', 'failed', 'canceled'].includes(selected)
-    ? 'history'
-    : 'transfers'
   const categoryLink = ({
     status,
     label,
@@ -97,6 +94,8 @@ export function AppSidebar({
           status: status === 'all' ? undefined : status,
         }}
         onClick={onNavigate}
+        activeOptions={{ exact: true, includeSearch: true }}
+        activeProps={{ 'aria-current': active ? 'page' : undefined }}
         aria-current={active ? 'page' : undefined}
         className={`${linkClass} ${active ? 'active' : ''}`}
       >
@@ -111,42 +110,17 @@ export function AppSidebar({
   return (
     <aside
       id={id}
-      aria-label="Workspace sidebar"
+      aria-label="Download filters"
       className="h-full overflow-y-auto bg-sidebar p-2"
     >
       <nav aria-label="Download categories" className="space-y-2">
         {categoryLink(categories[0])}
-        <Accordion key={selectedGroup} defaultValue={[selectedGroup]}>
-          {[
-            {
-              value: 'transfers',
-              label: 'Transfers',
-              statuses: [
-                'downloading',
-                'queued',
-                'connecting',
-                'paused',
-                'verifying',
-              ],
-            },
-            {
-              value: 'history',
-              label: 'History',
-              statuses: ['completed', 'failed', 'canceled'],
-            },
-          ].map((group) => (
-            <AccordionItem key={group.value} value={group.value}>
-              <AccordionTrigger>{group.label}</AccordionTrigger>
-              <AccordionContent className="space-y-0.5 pl-2">
-                {categories
-                  .filter((category) =>
-                    group.statuses.includes(category.status),
-                  )
-                  .map(categoryLink)}
-              </AccordionContent>
-            </AccordionItem>
-          ))}
-        </Accordion>
+        <p className="px-2.5 pt-3 pb-1 text-[11px] font-medium text-muted-foreground">
+          Status
+        </p>
+        <div className="space-y-0.5">
+          {categories.slice(1).map(categoryLink)}
+        </div>
         <Accordion defaultValue={['categories']}>
           <AccordionItem value="queues">
             <AccordionTrigger>Queues</AccordionTrigger>
@@ -170,9 +144,6 @@ export function AppSidebar({
                   </span>
                 </Link>
               ))}
-              <Link to="/queues" onClick={onNavigate} className={linkClass}>
-                Manage queues
-              </Link>
             </AccordionContent>
           </AccordionItem>
           {(['categories', 'tags'] as const).map((group) => (

@@ -13,14 +13,15 @@ import { useAddDownload } from './add-download-context'
 export function DownloadsEmpty() {
   const add = useAddDownload()
   return (
-    <Empty className="min-h-64 border">
+    <Empty className="min-h-64 flex-1 border-0">
       <EmptyHeader>
         <EmptyMedia variant="icon">
           <Download aria-hidden="true" />
         </EmptyMedia>
         <EmptyTitle>Your next download starts here</EmptyTitle>
         <EmptyDescription>
-          Add a direct link. Keep every transfer in one place.
+          Paste a download link here or choose Add download. Use the filters on
+          the left to organize your files.
         </EmptyDescription>
       </EmptyHeader>
       <Button onClick={add}>Add your first download</Button>

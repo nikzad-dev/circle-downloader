@@ -40,7 +40,10 @@ export function AppMenubar() {
               render={
                 <Link
                   to={to}
-                  activeOptions={{ exact: to === '/', includeSearch: false }}
+                  activeOptions={{
+                    exact: to !== '/downloads',
+                    includeSearch: false,
+                  }}
                   search={to === '/downloads' ? {} : undefined}
                 />
               }

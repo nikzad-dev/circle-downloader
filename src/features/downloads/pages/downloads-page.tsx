@@ -21,7 +21,7 @@ import {
 import { DownloadsTable } from '../components/downloads-table'
 import { DownloadsToolbar } from '../components/downloads-toolbar'
 import { useProgressConnection } from '../hooks/progress-context'
-import { taskActions } from '../lib/format'
+import { formatSpeed, taskActions } from '../lib/format'
 import { filterAndSortTasks } from '../lib/task-query'
 
 type BulkAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove'
@@ -119,7 +119,7 @@ export function DownloadsPage({
   }
 
   return (
-    <section className="space-y-4">
+    <section className="flex h-full min-h-0 flex-col gap-0">
       <h1 className="sr-only">Downloads</h1>
       {[search.category, search.tag, search.queueId].some(
         (value) => value !== undefined && value !== '',
@@ -189,13 +189,11 @@ export function DownloadsPage({
       {query.isPending ? (
         <DownloadsLoading />
       ) : (
-        query.data &&
-        (query.data.length ? (
-          <div className="border bg-card">
+        query.data && (
+          <div className="flex min-h-0 flex-1 flex-col bg-card">
             <DownloadsToolbar
               search={{
                 ...search,
-                q: search.q,
                 status: search.status ?? 'all',
                 sort: search.sort ?? 'created_asc',
               }}
@@ -204,22 +202,74 @@ export function DownloadsPage({
               selectedCount={selectedIds.length}
               onBulk={(action) => void onBulk(action)}
               bulkPending={bulkPending}
+              availableActions={(
+                ['pause', 'resume', 'retry', 'cancel', 'remove'] as const
+              ).filter((action) =>
+                query.data.some(
+                  (task) =>
+                    rowSelection[task.id] &&
+                    (action === 'remove' || taskActions(task.status)[action]),
+                ),
+              )}
             />
-            {visible.length ? (
+            {query.data.length === 0 ? (
+              <div className="flex min-h-0 flex-1 flex-col">
+                <DownloadsTable tasks={[]} />
+                <DownloadsEmpty />
+              </div>
+            ) : visible.length ? (
               <DownloadsTable
                 tasks={visible}
                 rowSelection={rowSelection}
                 onRowSelectionChange={setRowSelection}
               />
             ) : (
-              <p className="p-6 text-sm text-muted-foreground">
-                No downloads match these filters.
-              </p>
+              <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+                <p>No downloads match these filters.</p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => onSearchChange({})}
+                >
+                  Show all downloads
+                </Button>
+              </div>
             )}
+            <footer
+              aria-label="Download summary"
+              className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t bg-sidebar px-3 py-2 text-[11px] text-muted-foreground tabular-nums"
+            >
+              <span>{query.data.length} downloads</span>
+              <span>
+                {
+                  query.data.filter((task) => task.status === 'downloading')
+                    .length
+                }{' '}
+                downloading
+              </span>
+              <span>
+                {
+                  query.data.filter((task) => task.status === 'completed')
+                    .length
+                }{' '}
+                completed
+              </span>
+              <span className="ml-auto">
+                Total speed:{' '}
+                {formatSpeed(
+                  query.data.reduce(
+                    (sum, task) =>
+                      sum +
+                      (task.status === 'downloading'
+                        ? task.speedBytesPerSecond
+                        : 0),
+                    0,
+                  ),
+                )}
+              </span>
+            </footer>
           </div>
-        ) : (
-          <DownloadsEmpty />
-        ))
+        )
       )}
       {detailsSlot}
     </section>

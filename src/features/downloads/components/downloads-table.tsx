@@ -8,9 +8,15 @@ import {
 } from '@tanstack/react-table'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import { cn } from 'cn'
-import { FileDown } from 'lucide-react'
+import {
+  FileArchive,
+  FileAudio,
+  FileDown,
+  FileImage,
+  FileText,
+  FileVideo,
+} from 'lucide-react'
 import { useEffect, useMemo, useRef } from 'react'
-import { Badge } from '@/components/ui/badge'
 import { Checkbox } from '@/components/ui/checkbox'
 import {
   Table,
@@ -22,7 +28,12 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { downloadErrorMessage } from '../lib/errors'
-import { formatBytes, formatDate, statusLabels } from '../lib/format'
+import {
+  formatBytes,
+  formatDate,
+  formatSpeed,
+  statusLabels,
+} from '../lib/format'
 import { ProgressCell } from './progress-cell'
 import { TaskActions } from './task-actions'
 
@@ -52,6 +63,7 @@ export function DownloadsTable({
                   <Checkbox
                     aria-label="Select all downloads"
                     checked={table.getIsAllRowsSelected()}
+                    indeterminate={table.getIsSomeRowsSelected()}
                     onCheckedChange={(value) =>
                       table.toggleAllRowsSelected(!!value)
                     }
@@ -76,75 +88,19 @@ export function DownloadsTable({
         cell: ({ row }) => {
           const task = row.original
           return (
-            <div className="flex min-w-0 items-start gap-2.5">
-              <FileDown
-                className="mt-0.5 hidden size-4 shrink-0 text-muted-foreground sm:block"
-                aria-hidden="true"
-              />
-              <div className="min-w-0 flex-1 space-y-0.5">
-                <div className="flex flex-wrap items-center gap-1.5">
-                  <Link
-                    to="/downloads/$downloadId"
-                    params={{ downloadId: task.id }}
-                    className="block max-w-44 truncate text-sm font-medium underline-offset-4 hover:underline sm:max-w-64 lg:max-w-80"
-                    title={task.fileName}
-                  >
-                    {task.fileName}
-                  </Link>
-                  <Badge
-                    variant={
-                      task.status === 'failed' ? 'destructive' : 'secondary'
-                    }
-                    className="h-4 px-1.5 py-0 text-[10px] font-normal"
-                  >
-                    {statusLabels[task.status]}
-                  </Badge>
-                </div>
-
-                {task.actualSha256 !== null && (
-                  <div className="max-w-64 text-xs text-muted-foreground leading-tight">
-                    <p>
-                      {task.checksumResult === 'matched'
-                        ? 'SHA-256 verified'
-                        : task.checksumResult === 'mismatch'
-                          ? 'SHA-256 mismatch'
-                          : 'SHA-256 calculated · no expected checksum'}
-                    </p>
-                    <code className="block break-all select-all font-mono text-[11px] opacity-80">
-                      {task.actualSha256}
-                    </code>
-                  </div>
-                )}
-
-                {task.status === 'queued' && task.nextRetryAt !== null && (
-                  <p className="max-w-64 text-xs leading-tight whitespace-normal text-muted-foreground">
-                    Retrying at {new Date(task.nextRetryAt).toLocaleString()}
-                    {task.retryCount > 0
-                      ? ` · attempt ${task.retryCount} of 5`
-                      : ''}
-                  </p>
-                )}
-                {task.status === 'queued' &&
-                  task.nextRetryAt === null &&
-                  task.retryCount === 0 && (
-                    <p className="max-w-64 text-xs leading-tight text-muted-foreground">
-                      Waiting for a free download slot
-                    </p>
-                  )}
-                {task.error && (
-                  <p className="max-w-64 text-xs leading-tight whitespace-normal text-destructive">
-                    {downloadErrorMessage(task.error)}
-                  </p>
-                )}
-              </div>
+            <div className="flex min-w-0 items-center gap-2">
+              <FileIcon name={task.fileName} />
+              <Link
+                to="/downloads/$downloadId"
+                params={{ downloadId: task.id }}
+                className="block min-w-0 truncate text-xs font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                title={task.fileName}
+              >
+                {task.fileName}
+              </Link>
             </div>
           )
         },
-      }),
-      helper.display({
-        id: 'progress',
-        header: 'Progress / speed',
-        cell: ({ row }) => <ProgressCell task={row.original} />,
       }),
       helper.display({
         id: 'size',
@@ -156,11 +112,55 @@ export function DownloadsTable({
               ? row.original.downloadedBytes
               : null)
           return (
-            <span className="text-xs text-muted-foreground tabular-nums whitespace-nowrap">
+            <span className="tabular-nums">
               {bytes !== null ? formatBytes(bytes) : '—'}
             </span>
           )
         },
+      }),
+      helper.display({
+        id: 'status',
+        header: 'Status',
+        cell: ({ row }) => (
+          <span
+            className="inline-flex items-center gap-1.5"
+            data-download-status={row.original.status}
+            title={
+              row.original.error
+                ? downloadErrorMessage(row.original.error)
+                : undefined
+            }
+          >
+            <span
+              className="status-dot size-1.5 shrink-0 rounded-full bg-current"
+              aria-hidden="true"
+            />
+            {statusLabels[row.original.status]}
+          </span>
+        ),
+      }),
+      helper.display({
+        id: 'progress',
+        header: 'Progress',
+        cell: ({ row }) => <ProgressCell task={row.original} compact />,
+      }),
+      helper.display({
+        id: 'speed',
+        header: 'Speed',
+        cell: ({ row }) => (
+          <span className="tabular-nums">
+            {row.original.status === 'downloading'
+              ? formatSpeed(row.original.speedBytesPerSecond)
+              : '—'}
+          </span>
+        ),
+      }),
+      helper.display({
+        id: 'remaining',
+        header: 'Time left',
+        cell: ({ row }) => (
+          <span className="tabular-nums">{timeLeft(row.original)}</span>
+        ),
       }),
       helper.display({
         id: 'dateAdded',
@@ -178,6 +178,39 @@ export function DownloadsTable({
         },
       }),
 
+      helper.display({
+        id: 'description',
+        header: 'Description',
+        cell: ({ row }) => {
+          const task = row.original
+          const description = task.error
+            ? downloadErrorMessage(task.error)
+            : task.actualSha256
+              ? task.checksumResult === 'matched'
+                ? 'SHA-256 verified'
+                : task.checksumResult === 'mismatch'
+                  ? 'SHA-256 mismatch'
+                  : 'SHA-256 calculated · no expected checksum'
+              : task.nextRetryAt
+                ? `Retrying at ${new Date(task.nextRetryAt).toLocaleString()}`
+                : task.status === 'queued'
+                  ? 'Waiting for a free download slot'
+                  : sourceHost(task.url)
+          return (
+            <span
+              className="block truncate text-muted-foreground"
+              title={[description, task.actualSha256]
+                .filter(Boolean)
+                .join(' · ')}
+            >
+              {description}
+              {task.actualSha256 && (
+                <span className="sr-only">{task.actualSha256}</span>
+              )}
+            </span>
+          )
+        },
+      }),
       helper.display({
         id: 'actions',
         header: 'Actions',
@@ -215,7 +248,7 @@ export function DownloadsTable({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 48,
+    estimateSize: () => 36,
     overscan: 8,
     enabled: virtualize,
   })
@@ -258,13 +291,14 @@ export function DownloadsTable({
               data-state={row.getIsSelected() ? 'selected' : undefined}
               data-index={item.index}
               ref={virtualizer.measureElement}
-              className="hover:bg-muted/40 transition-colors"
+              className="download-row"
             >
               {row.getAllCells().map((cell) => (
                 <TableCell
                   key={cell.id}
+                  data-column={cell.column.id}
                   className={cn(
-                    'py-1.5 px-2.5',
+                    'h-9 py-1 px-2.5 text-xs',
                     cell.column.id === 'actions' && 'text-right',
                     cell.column.id === 'size' && 'text-right',
                     cell.column.id === 'select' && 'w-10 px-2 text-center',
@@ -295,13 +329,14 @@ export function DownloadsTable({
           <TableRow
             key={row.id}
             data-state={row.getIsSelected() ? 'selected' : undefined}
-            className="hover:bg-muted/40 transition-colors"
+            className="download-row"
           >
             {row.getAllCells().map((cell) => (
               <TableCell
                 key={cell.id}
+                data-column={cell.column.id}
                 className={cn(
-                  'py-1.5 px-2.5',
+                  'h-9 py-1 px-2.5 text-xs',
                   cell.column.id === 'actions' && 'text-right',
                   cell.column.id === 'size' && 'text-right',
                   cell.column.id === 'select' && 'w-10 px-2 text-center',
@@ -318,9 +353,21 @@ export function DownloadsTable({
   return (
     <div
       ref={parentRef}
-      className={virtualize ? 'max-h-[70vh] overflow-auto' : undefined}
+      className="downloads-grid min-h-0 flex-1 overflow-auto"
     >
-      <Table className="min-w-[640px]">
+      <Table className="min-w-[900px] table-fixed">
+        <colgroup>
+          {showSelection && <col style={{ width: 36 }} />}
+          <col style={{ width: 260 }} />
+          <col style={{ width: 86 }} />
+          <col style={{ width: 116 }} />
+          <col style={{ width: 142 }} />
+          <col style={{ width: 98 }} />
+          <col style={{ width: 80 }} />
+          <col className="download-date-column" style={{ width: 162 }} />
+          <col className="download-description-column" style={{ width: 150 }} />
+          <col style={{ width: 116 }} />
+        </colgroup>
         <TableCaption className="sr-only">
           Download status, progress and available actions
         </TableCaption>
@@ -330,9 +377,10 @@ export function DownloadsTable({
               {group.headers.map((header) => (
                 <TableHead
                   key={header.id}
+                  data-column={header.column.id}
                   scope="col"
                   className={cn(
-                    'h-8 px-2.5 text-xs font-medium',
+                    'h-8 px-2.5 text-xs font-medium tracking-normal normal-case',
                     header.column.id === 'actions' && 'text-right',
                     header.column.id === 'size' && 'text-right',
                     header.column.id === 'select' && 'w-10 px-2 text-center',
@@ -347,5 +395,50 @@ export function DownloadsTable({
         {body}
       </Table>
     </div>
+  )
+}
+
+function sourceHost(url: string) {
+  try {
+    return new URL(url).hostname
+  } catch {
+    return url
+  }
+}
+
+function timeLeft(task: DownloadTask) {
+  if (
+    task.status !== 'downloading' ||
+    task.totalBytes === null ||
+    task.speedBytesPerSecond <= 0
+  )
+    return '—'
+  const seconds = Math.ceil(
+    Math.max(0, task.totalBytes - task.downloadedBytes) /
+      task.speedBytesPerSecond,
+  )
+  if (seconds < 60) return `${seconds}s`
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
+  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
+}
+
+function FileIcon({ name }: { name: string }) {
+  const extension = name.split('.').pop()?.toLowerCase() ?? ''
+  const Icon = /^(zip|rar|7z|gz|tar)$/.test(extension)
+    ? FileArchive
+    : /^(mp4|mkv|webm|mov)$/.test(extension)
+      ? FileVideo
+      : /^(mp3|wav|flac|ogg)$/.test(extension)
+        ? FileAudio
+        : /^(png|jpg|jpeg|gif|webp|svg)$/.test(extension)
+          ? FileImage
+          : /^(pdf|txt|doc|docx)$/.test(extension)
+            ? FileText
+            : FileDown
+  return (
+    <Icon
+      className="size-4 shrink-0 text-muted-foreground"
+      aria-hidden="true"
+    />
   )
 }
