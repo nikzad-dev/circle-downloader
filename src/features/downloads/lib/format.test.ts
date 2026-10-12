@@ -31,6 +31,7 @@ describe('download presentation', () => {
       retry: false,
     })
     expect(taskActions('paused').resume).toBe(true)
+    expect(taskActions('paused').retry).toBe(true)
     expect(taskActions('failed').retry).toBe(true)
   })
   it.each([

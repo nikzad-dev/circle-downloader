@@ -344,21 +344,57 @@ impl DownloadManager {
 
     pub async fn retry(&self, id: &str) -> Result<DownloadTask, AppError> {
         let _control = self.inner.controls.lock().await;
-        if self.inner.db.get_download(id)?.status != DownloadStatus::Failed {
-            return Err(AppError::new(
-                ErrorCode::InvalidTransition,
-                "Only failed tasks can be retried",
-            ));
-        }
+        ensure_transition(
+            self.inner.db.get_download(id)?.status,
+            DownloadStatus::Queued,
+        )?;
         self.stop_worker(id).await;
         let task = {
             let _mutation = self.inner.mutations.lock();
             let mut task = self.inner.db.get_download(id)?;
-            if task.status != DownloadStatus::Failed {
-                return Err(AppError::new(
-                    ErrorCode::InvalidTransition,
-                    "Only failed tasks can be retried",
-                ));
+            ensure_transition(task.status, DownloadStatus::Queued)?;
+            let reset_partial = task.error.as_ref().is_some_and(|e| {
+                matches!(
+                    e.code,
+                    ErrorCode::ResourceChanged
+                        | ErrorCode::RangeUnsupported
+                        | ErrorCode::LengthMismatch
+                        | ErrorCode::ChecksumMismatch
+                )
+            });
+            if reset_partial {
+                if let Some(temp) = &task.temp_path {
+                    let root = resolve_root(&self.inner, &task.destination_id)?;
+                    let files = destination_files(&self.inner, &task.destination_id)?;
+                    for segment in self.inner.db.list_segments(&task.id)? {
+                        let path = segment_file_path(temp, segment.segment_index);
+                        if let Ok(managed) = managed_name(&root, &path.to_string_lossy()) {
+                            let _ = files.remove(&managed);
+                        }
+                    }
+                    if let Ok(managed) = managed_name(&root, temp) {
+                        let _ = files.remove(&managed);
+                    }
+                    let _ = self.inner.db.clear_segments(&task.id);
+                }
+                task.downloaded_bytes = 0;
+                task.etag = None;
+                task.last_modified = None;
+                task.transfer_mode = TransferMode::Single;
+            } else if let Some(temp) = &task.temp_path {
+                let root = resolve_root(&self.inner, &task.destination_id)?;
+                let files = destination_files(&self.inner, &task.destination_id)?;
+                let name = managed_name(&root, temp)?;
+                task.downloaded_bytes = if task.transfer_mode == TransferMode::Segmented {
+                    self.inner
+                        .db
+                        .list_segments(&task.id)?
+                        .iter()
+                        .map(|s| s.completed_bytes)
+                        .sum()
+                } else {
+                    files.length(&name)?.unwrap_or(0)
+                };
             }
             // Manual retry forces immediate dispatch without consuming an extra budget slot.
             enqueue_runnable(&self.inner, &mut task)?;

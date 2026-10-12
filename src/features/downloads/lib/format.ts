@@ -56,6 +56,6 @@ export function taskActions(status: DownloadStatus) {
     pause: ['queued', 'connecting', 'downloading'].includes(status),
     resume: status === 'paused',
     cancel: !['completed', 'canceled'].includes(status),
-    retry: status === 'failed',
+    retry: status === 'failed' || status === 'paused',
   }
 }

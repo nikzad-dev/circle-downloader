@@ -121,6 +121,18 @@ function DetailsBody({ task }: { task: DownloadTask }) {
                   fresh download when resume is unsafe.
                 </p>
               )}
+              {task.error.code === 'RESOURCE_CHANGED' && (
+                <p className="mt-2 text-muted-foreground">
+                  The partial file cannot be continued safely. Retry to download
+                  it fresh from the beginning.
+                </p>
+              )}
+              {task.error.code === 'RANGE_UNSUPPORTED' && (
+                <p className="mt-2 text-muted-foreground">
+                  The server cannot resume partial downloads. Retry to download
+                  it fresh from the beginning.
+                </p>
+              )}
             </dd>
           </div>
         )}

@@ -11,9 +11,10 @@ const messages: Record<ErrorCode, string> = {
   HTTP_UNAUTHORIZED: 'This link requires sign-in. Try a direct download link.',
   HTTP_FORBIDDEN: 'The server denied access. Check the download link.',
   HTTP_RATE_LIMIT: 'The server is busy. Wait a moment before retrying.',
-  RESOURCE_CHANGED: 'The file changed on the server. Add a fresh download.',
+  RESOURCE_CHANGED:
+    'The file changed or cannot be resumed. Retry to download from the beginning.',
   RANGE_UNSUPPORTED:
-    'The server cannot continue this partial download. Add a fresh download.',
+    'The server cannot continue this partial download. Retry to download from the beginning.',
   LENGTH_MISMATCH:
     'The received file length is incorrect. Add a fresh download.',
   URL_NOT_ALLOWED:

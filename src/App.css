@@ -3,6 +3,7 @@
 @import 'shadcn/tailwind.css';
 @import '@fontsource-variable/figtree';
 @import '@fontsource-variable/geist';
+@import '@kitlangton/rolling-number/styles.css';
 
 @custom-variant dark (&:is(.dark *));
 

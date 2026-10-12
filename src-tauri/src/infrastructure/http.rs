@@ -24,6 +24,7 @@ pub struct ResumeMetadata {
     pub effective_url: Option<String>,
     pub offset: u64,
     pub etag: Option<String>,
+    pub last_modified: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -155,14 +156,21 @@ fn validate_metadata(
             "Encoded file responses cannot be safely verified",
         ));
     }
-    let total_bytes = if resume.offset > 0 {
-        // Last-Modified alone may be a weak validator (multiple updates in one second).
-        // Until a Date/Last-Modified strength policy is persisted, require a strong ETag.
-        let valid_identity = resume
-            .etag
-            .as_deref()
-            .filter(|v| strong_etag(v))
-            .is_some_and(|expected| etag.as_deref() == Some(expected));
+    let total_bytes = if response.status() == StatusCode::PARTIAL_CONTENT && resume.offset > 0 {
+        // Validate with strong ETag or Last-Modified date (RFC 9110 If-Range).
+        let valid_identity =
+            if let Some(expected_etag) = resume.etag.as_deref().filter(|v| strong_etag(v)) {
+                etag.as_deref() == Some(expected_etag)
+            } else if let Some(expected_lm) = resume
+                .last_modified
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                last_modified.as_deref().map(str::trim) == Some(expected_lm)
+            } else {
+                false
+            };
         if !valid_identity {
             return Err(AppError::new(
                 ErrorCode::ResourceChanged,
@@ -662,16 +670,22 @@ async fn transfer(
     }
     let mut request = client.get(url).header(header::ACCEPT_ENCODING, "identity");
     if resume.offset > 0 {
-        let validator = resume
-            .etag
-            .as_deref()
-            .filter(|v| strong_etag(v))
-            .ok_or_else(|| {
-                AppError::new(
-                    ErrorCode::ResourceChanged,
-                    "This partial file cannot be resumed safely; add a fresh download",
-                )
-            })?;
+        let validator = if let Some(etag) = resume.etag.as_deref().filter(|v| strong_etag(v)) {
+            Some(etag.to_string())
+        } else {
+            resume
+                .last_modified
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .map(ToString::to_string)
+        };
+        let validator = validator.ok_or_else(|| {
+            AppError::new(
+                ErrorCode::ResourceChanged,
+                "This partial file cannot be resumed safely; add a fresh download",
+            )
+        })?;
         request = request
             .header(header::RANGE, format!("bytes={}-", resume.offset))
             .header(header::IF_RANGE, validator);
@@ -683,10 +697,7 @@ async fn transfer(
     };
     match response.status() {
         StatusCode::OK if resume.offset > 0 => {
-            return Err(AppError::new(
-                ErrorCode::ResourceChanged,
-                "The server ignored Range; add a fresh download",
-            ));
+            // Server ignored Range or sent full representation: safely restart from byte 0.
         }
         StatusCode::PARTIAL_CONTENT if resume.offset == 0 => {
             return Err(AppError::new(
@@ -718,9 +729,14 @@ async fn transfer(
             &owned_files
         }
     };
-    let mut file = File::from_std(files.partial(Path::new(files.name(dest)?), resume.offset)?);
+    let resume_offset = if response.status() == StatusCode::OK {
+        0
+    } else {
+        resume.offset
+    };
+    let mut file = File::from_std(files.partial(Path::new(files.name(dest)?), resume_offset)?);
     let mut stream = response.bytes_stream();
-    let mut written = resume.offset;
+    let mut written = resume_offset;
     let started = Instant::now();
     let mut last_tick = started;
     let transfer = async {
@@ -929,6 +945,7 @@ mod tests {
                 effective_url: None,
                 offset: 5,
                 etag: Some("\"same\"".into()),
+                last_modified: None,
             },
             &cancel,
             |metadata| {
@@ -954,6 +971,87 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn resumes_with_last_modified_when_etag_is_absent() {
+        let (url, server) = serve(
+            b"HTTP/1.1 206 Partial Content\r\nLast-Modified: Wed, 21 Oct 2015 07:28:00 GMT\r\nContent-Range: bytes 5-10/11\r\nContent-Length: 6\r\nConnection: close\r\n\r\n world".to_vec(),
+            false,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.part");
+        tokio::fs::write(&path, b"hello").await.unwrap();
+        let (_tx, cancel) = cancel_pair();
+        let mut accepted_metadata = false;
+        let result = download_to_file(
+            &Client::new(),
+            &url,
+            &path,
+            ResumeMetadata {
+                effective_url: None,
+                offset: 5,
+                etag: None,
+                last_modified: Some("Wed, 21 Oct 2015 07:28:00 GMT".into()),
+            },
+            &cancel,
+            |metadata| {
+                assert_eq!(metadata.total_bytes, Some(11));
+                accepted_metadata = true;
+                Ok(())
+            },
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert!(accepted_metadata);
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello world");
+        assert_eq!(
+            result.sha256_hex,
+            hex::encode(Sha256::digest(b"hello world"))
+        );
+        assert_eq!(result.bytes_written, 11);
+        let request = server.await.unwrap().to_lowercase();
+        assert!(request.contains("range: bytes=5-"));
+        assert!(request.contains("if-range: wed, 21 oct 2015 07:28:00 gmt"));
+    }
+
+    #[tokio::test]
+    async fn range_200_safely_restarts_from_byte_zero() {
+        let (url, server) = serve(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\nConnection: close\r\n\r\nhello world"
+                .to_vec(),
+            false,
+        )
+        .await;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("file.part");
+        tokio::fs::write(&path, b"OLD-PARTIAL-DATA").await.unwrap();
+        let (_tx, cancel) = cancel_pair();
+        let result = download_to_file(
+            &Client::new(),
+            &url,
+            &path,
+            ResumeMetadata {
+                effective_url: None,
+                offset: 16,
+                etag: Some("\"fixture-v1\"".into()),
+                last_modified: None,
+            },
+            &cancel,
+            |_| Ok(()),
+            |_| {},
+        )
+        .await
+        .unwrap();
+        assert_eq!(tokio::fs::read(&path).await.unwrap(), b"hello world");
+        assert_eq!(
+            result.sha256_hex,
+            hex::encode(Sha256::digest(b"hello world"))
+        );
+        assert_eq!(result.bytes_written, 11);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
     async fn changed_source_with_identical_etag_preserves_partial() {
         let (url, server) = serve(b"HTTP/1.1 206 Partial Content\r\nETag: \"same\"\r\nContent-Range: bytes 5-10/11\r\nContent-Length: 6\r\nConnection: close\r\n\r\n world".to_vec(), false).await;
         let dir = tempfile::tempdir().unwrap();
@@ -968,6 +1066,7 @@ mod tests {
                 offset: 5,
                 etag: Some("\"same\"".into()),
                 effective_url: Some("https://previous.example/file".into()),
+                last_modified: None,
             },
             &cancel,
             |_| panic!("changed source must not be accepted"),
@@ -1005,6 +1104,7 @@ mod tests {
                     effective_url: None,
                     offset: 5,
                     etag: Some("\"same\"".into()),
+                    last_modified: None,
                 },
                 &cancel,
                 |_| panic!("Invalid metadata must not be accepted"),
@@ -1032,6 +1132,7 @@ mod tests {
                     offset: 4,
                     etag,
                     effective_url: None,
+                    last_modified: None,
                 },
                 &cancel,
                 |_| Ok(()),

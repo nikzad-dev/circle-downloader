@@ -164,6 +164,7 @@ pub async fn download_with_optional_segmentation(
                 .or_else(|| (offset > 0).then(|| task.url.clone())),
             offset,
             etag: task.etag.clone(),
+            last_modified: task.last_modified.clone(),
         },
         cancel,
         on_metadata,

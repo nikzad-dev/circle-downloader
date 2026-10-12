@@ -42,6 +42,33 @@ describe('task actions', () => {
       )
     },
   )
+  it('allows retrying a paused download directly in full action mode', async () => {
+    invoke.mockResolvedValue(task({ revision: 2 }))
+    const { user } = setup('paused', false)
+    await user.click(screen.getByRole('button', { name: 'Retry file.zip' }))
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('retry_download', { id: 'task-1' }),
+    )
+  })
+  it('allows retrying a paused download via the more actions dropdown in compact mode', async () => {
+    invoke.mockResolvedValue(task({ revision: 2 }))
+    const { user } = setup('paused', true)
+    expect(
+      screen.getByRole('button', { name: 'Resume file.zip' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('button', { name: 'Retry file.zip' }),
+    ).not.toBeInTheDocument()
+    await user.click(
+      screen.getByRole('button', { name: 'More actions for file.zip' }),
+    )
+    await user.click(
+      await screen.findByRole('menuitem', { name: 'Retry download' }),
+    )
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('retry_download', { id: 'task-1' }),
+    )
+  })
   it('offers open, reveal, and remove for completed downloads', () => {
     setup('completed')
     expect(screen.getByRole('button', { name: 'Open file.zip' })).toBeEnabled()

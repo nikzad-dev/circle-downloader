@@ -317,6 +317,82 @@ async fn pause_resume_retry_remove() {
 }
 
 #[tokio::test]
+async fn retry_paused_task_re_queues_and_resumes() {
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: "https://example.com/paused-retry.bin".into(),
+            destination_id: None,
+            suggested_name: Some("paused-retry.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+
+    assert_eq!(task.status, DownloadStatus::Paused);
+    let retried = mgr.retry(&task.id).await.unwrap();
+    assert_eq!(retried.status, DownloadStatus::Queued);
+}
+
+#[tokio::test]
+async fn retry_after_resource_changed_resets_partial_and_completes() {
+    let base = spawn_fixture_server(|req| {
+        let (status, body) = if req.contains("range:") {
+            (412, b"".to_vec())
+        } else {
+            (200, b"FRESH-CONTENT".to_vec())
+        };
+        (status, body)
+    })
+    .await;
+
+    let (_dir, mgr) = manager();
+    let task = mgr
+        .create(CreateDownloadRequest {
+            url: format!("{base}/file.bin"),
+            destination_id: None,
+            suggested_name: Some("file.bin".into()),
+            start_now: false,
+            request_id: None,
+            expected_sha256: None,
+        })
+        .unwrap();
+
+    let temp = task.temp_path.clone().unwrap();
+    std::fs::write(&temp, b"OLD-PARTIAL").unwrap();
+
+    mgr.resume(&task.id).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Failed],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let failed = mgr.get(&task.id).unwrap();
+    assert_eq!(failed.status, DownloadStatus::Failed);
+
+    let retried = mgr.retry(&task.id).await.unwrap();
+    assert_eq!(retried.status, DownloadStatus::Queued);
+    assert_eq!(retried.downloaded_bytes, 0);
+
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(5),
+    )
+    .await;
+
+    let completed = mgr.get(&task.id).unwrap();
+    assert_eq!(completed.status, DownloadStatus::Completed);
+    let bytes = std::fs::read(mgr.download_dir().join("file.bin")).unwrap();
+    assert_eq!(bytes, b"FRESH-CONTENT");
+}
+
+#[tokio::test]
 async fn range_200_does_not_corrupt_partial() {
     let base = spawn_fixture_server(|req| {
         // Always ignore Range and return 200 full body.

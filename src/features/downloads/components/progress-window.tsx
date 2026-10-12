@@ -22,6 +22,7 @@ import {
 import { useEffect, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Progress } from '@/components/ui/progress'
+import { RollingNumber } from '@/components/ui/rolling-number'
 import { toast } from '@/components/ui/toast'
 import { advanced, advancedKeys, useQueues } from '@/features/advanced/api'
 import { downloadsKey, downloadsListOptions } from '../api/downloads'
@@ -236,13 +237,13 @@ export function ProgressWindow() {
           <div className="flex gap-5 text-xs">
             <span>
               <strong className="block text-lg font-semibold text-foreground tabular-nums">
-                {running.length}
+                <RollingNumber value={running.length} />
               </strong>
               Downloading
             </span>
             <span>
               <strong className="block text-lg font-semibold text-foreground tabular-nums">
-                {waiting.length}
+                <RollingNumber value={waiting.length} />
               </strong>
               Waiting / checking
             </span>

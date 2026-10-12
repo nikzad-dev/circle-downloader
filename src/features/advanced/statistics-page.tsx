@@ -1,6 +1,7 @@
 import { useQuery } from '@tanstack/react-query'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent } from '@/components/ui/card'
+import { RollingNumber } from '@/components/ui/rolling-number'
 import { formatBytes } from '@/features/downloads/lib/format'
 import { advanced, advancedKeys } from './api'
 
@@ -28,24 +29,45 @@ export function StatisticsPage() {
       {data && (
         <>
           <div className="grid gap-3 sm:grid-cols-4">
-            {[
-              ['Received bytes', formatBytes(data.transferredBytes)],
-              [
-                'Transfer worker time',
-                `${Math.round(data.transferMillis / 1000)} s`,
-              ],
-              ['Completed attempts', data.completedAttempts],
-              ['Failed attempts', data.failedAttempts],
-            ].map(([label, value]) => (
-              <Card key={label} size="sm">
-                <CardContent>
-                  <p className="text-xs text-muted-foreground">{label}</p>
-                  <p className="mt-1 text-lg font-semibold tabular-nums">
-                    {value}
-                  </p>
-                </CardContent>
-              </Card>
-            ))}
+            <Card size="sm">
+              <CardContent>
+                <p className="text-xs text-muted-foreground">Received bytes</p>
+                <p className="mt-1 text-lg font-semibold tabular-nums">
+                  {formatBytes(data.transferredBytes)}
+                </p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardContent>
+                <p className="text-xs text-muted-foreground">
+                  Transfer worker time
+                </p>
+                <p className="mt-1 text-lg font-semibold tabular-nums">
+                  <RollingNumber
+                    value={Math.round(data.transferMillis / 1000)}
+                  />{' '}
+                  s
+                </p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardContent>
+                <p className="text-xs text-muted-foreground">
+                  Completed attempts
+                </p>
+                <p className="mt-1 text-lg font-semibold tabular-nums">
+                  <RollingNumber value={data.completedAttempts} />
+                </p>
+              </CardContent>
+            </Card>
+            <Card size="sm">
+              <CardContent>
+                <p className="text-xs text-muted-foreground">Failed attempts</p>
+                <p className="mt-1 text-lg font-semibold tabular-nums">
+                  <RollingNumber value={data.failedAttempts} />
+                </p>
+              </CardContent>
+            </Card>
           </div>
           {data.days.length === 0 ? (
             <p className="rounded-md border p-4 text-sm text-muted-foreground">

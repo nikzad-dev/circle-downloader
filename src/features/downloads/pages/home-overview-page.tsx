@@ -1,5 +1,6 @@
 import { Download } from 'lucide-react'
 import { Card, CardContent } from '@/components/ui/card'
+import { RollingNumber } from '@/components/ui/rolling-number'
 import { useDownloads } from '../api/downloads'
 import {
   DownloadsEmpty,
@@ -44,7 +45,7 @@ export function HomeOverviewPage() {
                 {summary.label}
               </p>
               <p className="mt-1 font-heading text-lg font-semibold tabular-nums">
-                {query.data ? summary.value : '—'}
+                {query.data ? <RollingNumber value={summary.value} /> : '—'}
               </p>
             </CardContent>
           </Card>

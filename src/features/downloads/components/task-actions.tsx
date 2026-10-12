@@ -116,7 +116,9 @@ export function TaskActions({
       ).map(
         ([action, Icon, label]) =>
           allowed[action] &&
-          (!compact || action !== 'cancel') && (
+          (!compact ||
+            (action !== 'cancel' &&
+              (action !== 'retry' || task.status !== 'paused'))) && (
             <Button
               key={action}
               variant="ghost"
@@ -198,6 +200,12 @@ export function TaskActions({
               <DropdownMenuItem onClick={() => void openOrReveal('reveal')}>
                 <FolderOpen />
                 Reveal folder
+              </DropdownMenuItem>
+            )}
+            {allowed.retry && task.status === 'paused' && (
+              <DropdownMenuItem onClick={() => void act('retry')}>
+                <RotateCcw />
+                Retry download
               </DropdownMenuItem>
             )}
             {allowed.cancel && (

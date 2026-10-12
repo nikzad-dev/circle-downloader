@@ -102,7 +102,9 @@ impl ManagedFiles {
     pub fn partial(&self, name: &Path, offset: u64) -> Result<std::fs::File, AppError> {
         let mut file = match self.open(name, true, offset == 0) {
             Err(e) if offset == 0 && e.code == ErrorCode::AlreadyExists => {
-                self.open(name, true, false)?
+                let f = self.open(name, true, false)?;
+                f.set_len(0).map_err(map_io_err)?;
+                f
             }
             result => result?,
         };
