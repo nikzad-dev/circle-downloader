@@ -1,5 +1,5 @@
 import { Link, Outlet, useLocation } from '@tanstack/react-router'
-import { Circle, PanelLeft, Plus } from 'lucide-react'
+import { Circle, Download, PanelLeft, Plus } from 'lucide-react'
 import { useEffect, useState } from 'react'
 import { useDefaultLayout } from 'react-resizable-panels'
 import { AppMenubar } from '@/components/app-menubar'
@@ -20,19 +20,13 @@ import { toast } from '@/components/ui/toast'
 import { BulkImportButton } from '@/features/advanced/bulk-import'
 import { AddDownloadContext } from '@/features/downloads/components/add-download-context'
 import { openDownloadWindow } from '@/features/downloads/components/download-window-api'
+import { useDownloadDrop } from '@/features/downloads/hooks/use-download-drop'
+import { isEditableTarget } from '@/features/downloads/lib/input-target'
 import { pastedLinks } from '@/features/downloads/lib/pasted-links'
 import { strings } from '@/lib/ui-strings'
 
-function isEditableTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) return false
-  return (
-    target.closest(
-      'input, textarea, select, [contenteditable]:not([contenteditable="false"]), [role="textbox"], [role="dialog"], [role="alertdialog"]',
-    ) !== null
-  )
-}
-
 export function AppShell() {
+  const dragging = useDownloadDrop()
   const { pathname } = useLocation()
   const isDownloads = pathname === '/' || pathname.startsWith('/downloads')
   const [sidebarOpen, setSidebarOpen] = useState(true)
@@ -85,7 +79,26 @@ export function AppShell() {
   }, [])
   return (
     <AddDownloadContext value={() => add()}>
-      <div className="flex h-svh flex-col overflow-hidden bg-background text-foreground">
+      <div className="relative flex h-svh flex-col overflow-hidden bg-background text-foreground">
+        {dragging && (
+          <div
+            role="status"
+            className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-lg border-2 border-dashed border-sidebar-primary bg-background/95"
+          >
+            <div className="flex flex-col items-center gap-3 px-6 text-center">
+              <Download
+                className="size-8 text-sidebar-primary"
+                aria-hidden="true"
+              />
+              <p className="font-heading text-lg font-semibold">
+                Drop links to add downloads
+              </p>
+              <p className="text-sm text-muted-foreground">
+                Review the file and save location before starting.
+              </p>
+            </div>
+          </div>
+        )}
         <a
           href="#main-content"
           className="sr-only z-50 bg-background p-3 focus:not-sr-only focus:fixed"

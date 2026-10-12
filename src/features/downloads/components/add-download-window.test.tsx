@@ -1,9 +1,13 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { act, render, screen, waitFor } from '@testing-library/react'
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { task } from '@/test/fixtures'
-import { DownloadWindowHost, NewDownloadForm } from './add-download-window'
+import {
+  AddDownloadWindow,
+  DownloadWindowHost,
+  NewDownloadForm,
+} from './add-download-window'
 
 const invoke = vi.hoisted(() => vi.fn())
 const events = vi.hoisted(() => ({
@@ -358,7 +362,7 @@ it('fills bulk paste requests and protects a visible draft until replacement is 
     'https://example.com/draft',
   )
   const user = userEvent.setup()
-  await user.click(screen.getByRole('button', { name: 'Use pasted links' }))
+  await user.click(screen.getByRole('button', { name: 'Use new links' }))
   expect(screen.getByRole('tab', { name: 'Multiple URLs' })).toHaveAttribute(
     'aria-selected',
     'true',
@@ -380,4 +384,87 @@ it('fills bulk paste requests and protects a visible draft until replacement is 
   expect(screen.getByLabelText('Download URLs')).toHaveValue(
     'https://example.com/a.mp3\nhttps://example.com/b.pdf',
   )
+})
+
+it.each([false, true])(
+  'closes the download window with Escape in bulk mode %s',
+  async (initialBulk) => {
+    invoke.mockImplementation(async (command: string) =>
+      command === 'close_download_window' ? undefined : support(command),
+    )
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false } },
+    })
+    const { unmount } = render(
+      <QueryClientProvider client={client}>
+        <AddDownloadWindow initialBulk={initialBulk} />
+      </QueryClientProvider>,
+    )
+    fireEvent.keyDown(window, { key: 'Escape' })
+    await waitFor(() =>
+      expect(invoke).toHaveBeenCalledWith('close_download_window'),
+    )
+    const closes = invoke.mock.calls.filter(
+      ([command]) => command === 'close_download_window',
+    ).length
+    unmount()
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(
+      invoke.mock.calls.filter(
+        ([command]) => command === 'close_download_window',
+      ),
+    ).toHaveLength(closes)
+  },
+)
+it('leaves Escape handled by nested controls alone and ignores key repeats', () => {
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <AddDownloadWindow />
+    </QueryClientProvider>,
+  )
+  const event = new KeyboardEvent('keydown', {
+    key: 'Escape',
+    bubbles: true,
+    cancelable: true,
+  })
+  event.preventDefault()
+  fireEvent(screen.getByLabelText('Download URL'), event)
+  fireEvent.keyDown(window, { key: 'Escape', repeat: true })
+  expect(
+    invoke.mock.calls.some(([command]) => command === 'close_download_window'),
+  ).toBe(false)
+})
+it('does not close on Escape while a download is being submitted', async () => {
+  let complete!: (value: ReturnType<typeof task>) => void
+  invoke.mockImplementation(async (command: string) =>
+    command === 'create_configured_download'
+      ? new Promise<ReturnType<typeof task>>((resolve) => {
+          complete = resolve
+        })
+      : command === 'close_download_window'
+        ? undefined
+        : support(command),
+  )
+  const client = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  })
+  render(
+    <QueryClientProvider client={client}>
+      <AddDownloadWindow initialUrl="https://example.com/file.zip" />
+    </QueryClientProvider>,
+  )
+  const user = userEvent.setup()
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Add download' })).toBeEnabled(),
+  )
+  await user.click(screen.getByRole('button', { name: 'Add download' }))
+  await screen.findByRole('button', { name: 'Adding…' })
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(
+    invoke.mock.calls.some(([command]) => command === 'close_download_window'),
+  ).toBe(false)
+  await act(async () => complete(task()))
 })

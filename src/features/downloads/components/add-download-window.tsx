@@ -9,6 +9,7 @@ import { useForm } from 'react-hook-form'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
+import { toast } from '@/components/ui/toast'
 import { advanced, emptyTaskOptions } from '@/features/advanced/api'
 import { BulkImportForm } from '@/features/advanced/bulk-import'
 import { categoryFromSource } from '@/features/advanced/categories'
@@ -86,8 +87,8 @@ export function DownloadWindowHost() {
           >
             <span className="mr-auto">
               {incoming.bulk
-                ? `${incoming.initialUrls?.length ?? 0} links pasted`
-                : 'New link pasted'}
+                ? `${incoming.initialUrls?.length ?? 0} new links`
+                : 'New download link'}
               . Use them instead of this draft?
             </span>
             <Button
@@ -105,7 +106,7 @@ export function DownloadWindowHost() {
                 setIncoming(null)
               }}
             >
-              Use pasted links
+              Use new links
             </Button>
           </div>
         )
@@ -129,6 +130,30 @@ export function AddDownloadWindow({
 }) {
   const [bulk, setBulk] = useState(initialBulk)
   const [busy, setBusy] = useState(false)
+  const closingRef = useRef(false)
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.key !== 'Escape' ||
+        event.defaultPrevented ||
+        event.repeat ||
+        busy ||
+        closingRef.current
+      )
+        return
+      event.preventDefault()
+      closingRef.current = true
+      void closeDownloadWindow()
+        .catch(() =>
+          toast.add({ title: 'Could not close this window', type: 'error' }),
+        )
+        .finally(() => {
+          closingRef.current = false
+        })
+    }
+    window.addEventListener('keydown', onKeyDown)
+    return () => window.removeEventListener('keydown', onKeyDown)
+  }, [busy])
   const updateBusy = (value: boolean) => {
     setBusy(value)
     onBusyChange?.(value)

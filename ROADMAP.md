@@ -225,3 +225,7 @@ Read from `/Users/circle/Downloads/circle-downloader-blueprint/`: docs/ROADMAP, 
 Where the pack disagrees on release timing (UI_UX labels bulk/search MVP, PRODUCT stages them later), this plan puts engine correctness first and places those list tools in N3.
 
 Resume planning follows [RFC 9110 range semantics](https://www.rfc-editor.org/rfc/rfc9110.html#section-14). Native hardening uses [Tauri security guidance](https://v2.tauri.app/security/); release update planning uses [Tauri updater signature requirements](https://v2.tauri.app/plugin/updater/). These are design references, not claims that the features already exist.
+
+### Link drag-and-drop (2026-10-12)
+
+Implemented external browser-link and URL-text drops in the main workspace with an overlay, copy feedback, URI-list/Firefox parsing, deduplication, import limits and existing download-window draft protection. Invalid drops cannot navigate the workspace. Inputs, dialogs and internal drags retain their behavior. Evidence: `dropped-links.test.ts`, `use-download-drop.test.tsx`, and shell integration tests. Frontend build and tests verified; physical cross-app drops on Windows/Linux remain part of release QA.

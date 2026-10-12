@@ -310,3 +310,28 @@ it('does not open a download window when pasted links exceed the import limit', 
     invoke.mock.calls.some(([command]) => command === 'open_download_window'),
   ).toBe(false)
 })
+
+it('prepares a dropped browser link from the main workspace', async () => {
+  invoke.mockResolvedValue([])
+  await setup('/downloads')
+  const dataTransfer = {
+    types: ['text/uri-list', 'text/plain'],
+    getData: (type: string) =>
+      type === 'text/uri-list'
+        ? 'https://example.com/download.zip'
+        : 'Download ZIP',
+    dropEffect: 'none',
+  }
+  fireEvent.dragEnter(screen.getByRole('main'), { dataTransfer })
+  expect(screen.getByText('Drop links to add downloads')).toBeInTheDocument()
+  fireEvent.drop(screen.getByRole('main'), { dataTransfer })
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith('open_download_window', {
+      initialUrl: 'https://example.com/download.zip',
+      bulk: false,
+    }),
+  )
+  expect(
+    screen.queryByText('Drop links to add downloads'),
+  ).not.toBeInTheDocument()
+})

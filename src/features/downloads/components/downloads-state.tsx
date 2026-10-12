@@ -20,8 +20,8 @@ export function DownloadsEmpty() {
         </EmptyMedia>
         <EmptyTitle>Your next download starts here</EmptyTitle>
         <EmptyDescription>
-          Paste a download link here or choose Add download. Use the filters on
-          the left to organize your files.
+          Drop or paste a download link here, or choose Add download. Use the
+          filters on the left to organize your files.
         </EmptyDescription>
       </EmptyHeader>
       <Button onClick={add}>Add your first download</Button>
