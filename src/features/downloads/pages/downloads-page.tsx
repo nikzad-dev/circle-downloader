@@ -1,3 +1,4 @@
+import { Tabs } from '@base-ui/react/tabs'
 import type { ReactNode } from 'react'
 import type { DownloadsSearch } from '../lib/task-query'
 import { useQueryClient } from '@tanstack/react-query'
@@ -5,7 +6,8 @@ import { useNavigate } from '@tanstack/react-router'
 import { useMemo, useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { toast } from '@/components/ui/toast'
-import { useTaskOptions } from '@/features/advanced/api'
+import { useQueues, useTaskOptions } from '@/features/advanced/api'
+import { QueueStartNotice } from '@/features/advanced/queue-start-notice'
 import { orpc } from '@/lib/orpc/client'
 import {
   mergeTask,
@@ -21,8 +23,22 @@ import {
 import { DownloadsTable } from '../components/downloads-table'
 import { DownloadsToolbar } from '../components/downloads-toolbar'
 import { useProgressConnection } from '../hooks/progress-context'
-import { formatSpeed, taskActions } from '../lib/format'
+import {
+  activeStatuses,
+  formatSpeed,
+  statusLabels,
+  taskActions,
+} from '../lib/format'
 import { filterAndSortTasks } from '../lib/task-query'
+
+const downloadTabs = [
+  { value: 'all', label: 'All' },
+  { value: 'active', label: 'Active' },
+  { value: 'paused', label: 'Paused' },
+  { value: 'completed', label: 'Completed' },
+  { value: 'failed', label: 'Failed' },
+  { value: 'canceled', label: 'Canceled' },
+] as const
 
 type BulkAction = 'pause' | 'resume' | 'retry' | 'cancel' | 'remove'
 
@@ -35,6 +51,7 @@ export function DownloadsPage({
 }) {
   const query = useDownloads()
   const options = useTaskOptions()
+  const queues = useQueues()
   const optionsById = useMemo(
     () => new Map(options.data?.map((o) => [o.id, o])),
     [options.data],
@@ -120,143 +137,46 @@ export function DownloadsPage({
 
   return (
     <section className="flex h-full min-h-0 flex-col gap-0">
-      <h1 className="sr-only">Downloads</h1>
-      {[search.category, search.tag, search.queueId].some(
-        (value) => value !== undefined && value !== '',
-      ) && (
-        <div className="flex items-center gap-2 text-xs text-muted-foreground">
-          <span>
-            {[search.category, search.tag, search.queueId]
-              .filter(Boolean)
-              .join(' · ')}
-          </span>
-          <Button
-            size="sm"
-            variant="ghost"
-            onClick={() =>
-              onSearchChange({
-                ...search,
-                category: undefined,
-                tag: undefined,
-                queueId: undefined,
-              })
-            }
-          >
-            Clear organization filter
-          </Button>
-        </div>
-      )}
-      {options.isError && (
-        <div
-          role="alert"
-          className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm"
-        >
-          <span>Queue, category and tag details could not be loaded.</span>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => void options.refetch()}
-          >
-            Retry organization details
-          </Button>
-        </div>
-      )}
-      {connection.unavailable && (
-        <div
-          role="status"
-          className="flex flex-wrap items-center justify-between gap-3 border bg-muted/40 p-3 text-sm"
-        >
-          <span>Live updates unavailable. Refresh to check progress.</span>
-          <Button
-            size="sm"
-            variant="outline"
-            onClick={() => {
-              connection.reconnect()
-              void query.refetch()
-            }}
-          >
-            Reconnect
-          </Button>
-        </div>
-      )}
-      {query.isError && (
-        <DownloadsError
-          retry={() => void query.refetch()}
-          pending={query.isFetching}
-          background={query.data !== undefined}
-        />
-      )}
-      {query.isPending ? (
-        <DownloadsLoading />
-      ) : (
-        query.data && (
-          <div className="flex min-h-0 flex-1 flex-col bg-card">
-            <DownloadsToolbar
-              search={{
-                ...search,
-                status: search.status ?? 'all',
-                sort: search.sort ?? 'created_asc',
-              }}
-              onChange={onSearchChange}
-              fileCount={`${visible.length}${visible.length !== query.data.length ? ` of ${query.data.length}` : ''} ${query.data.length === 1 ? 'file' : 'files'}`}
-              selectedCount={selectedIds.length}
-              onBulk={(action) => void onBulk(action)}
-              bulkPending={bulkPending}
-              availableActions={(
-                ['pause', 'resume', 'retry', 'cancel', 'remove'] as const
-              ).filter((action) =>
-                query.data.some(
-                  (task) =>
-                    rowSelection[task.id] &&
-                    (action === 'remove' || taskActions(task.status)[action]),
-                ),
-              )}
-            />
-            {query.data.length === 0 ? (
-              <div className="flex min-h-0 flex-1 flex-col">
-                <DownloadsTable tasks={[]} />
-                <DownloadsEmpty />
-              </div>
-            ) : visible.length ? (
-              <DownloadsTable
-                tasks={visible}
-                rowSelection={rowSelection}
-                onRowSelectionChange={setRowSelection}
-              />
-            ) : (
-              <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
-                <p>No downloads match these filters.</p>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => onSearchChange({})}
-                >
-                  Show all downloads
-                </Button>
-              </div>
-            )}
-            <footer
-              aria-label="Download summary"
-              className="flex shrink-0 flex-wrap items-center gap-x-5 gap-y-1 border-t bg-sidebar px-3 py-2 text-[11px] text-muted-foreground tabular-nums"
-            >
-              <span>{query.data.length} downloads</span>
-              <span>
-                {
-                  query.data.filter((task) => task.status === 'downloading')
-                    .length
-                }{' '}
-                downloading
-              </span>
-              <span>
-                {
-                  query.data.filter((task) => task.status === 'completed')
-                    .length
-                }{' '}
-                completed
-              </span>
-              <span className="ml-auto">
-                Total speed:{' '}
-                {formatSpeed(
+      <Tabs.Root
+        value={search.status ?? 'all'}
+        className="flex min-h-0 flex-1 flex-col"
+        onValueChange={(value) => {
+          if (typeof value !== 'string') return
+          setRowSelection({})
+          onSearchChange({
+            ...search,
+            status: value as DownloadsSearch['status'],
+          })
+        }}
+      >
+        <DownloadsToolbar
+          search={{
+            ...search,
+            status: search.status ?? 'all',
+            sort: search.sort ?? 'created_asc',
+          }}
+          onChange={onSearchChange}
+          fileCount={
+            query.data
+              ? `${visible.length}${visible.length !== query.data.length ? ` of ${query.data.length}` : ''} ${query.data.length === 1 ? 'file' : 'files'}`
+              : undefined
+          }
+          selectedCount={selectedIds.length}
+          onBulk={(action) => void onBulk(action)}
+          bulkPending={bulkPending}
+          onClearSelection={() => setRowSelection({})}
+          availableActions={(
+            ['pause', 'resume', 'retry', 'cancel', 'remove'] as const
+          ).filter((action) =>
+            (query.data ?? []).some(
+              (task) =>
+                rowSelection[task.id] &&
+                (action === 'remove' || taskActions(task.status)[action]),
+            ),
+          )}
+          speed={
+            query.data
+              ? formatSpeed(
                   query.data.reduce(
                     (sum, task) =>
                       sum +
@@ -265,12 +185,135 @@ export function DownloadsPage({
                         : 0),
                     0,
                   ),
+                )
+              : undefined
+          }
+          queueName={
+            queues.data?.find((queue) => queue.id === search.queueId)?.name
+          }
+        >
+          <Tabs.List
+            aria-label="Download sections"
+            className="flex shrink-0 gap-1 overflow-x-auto px-5 pb-3"
+          >
+            {downloadTabs.map(({ value, label }) => (
+              <Tabs.Tab
+                key={value}
+                value={value}
+                className="relative flex shrink-0 items-center gap-2 rounded-md px-3 py-1.5 text-sm font-medium text-muted-foreground outline-none hover:text-foreground focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring data-active:bg-muted data-active:text-foreground"
+              >
+                {label}
+                <span className="text-[11px] text-muted-foreground tabular-nums">
+                  {query.data?.filter(
+                    (task) =>
+                      value === 'all' ||
+                      (value === 'active'
+                        ? activeStatuses.has(task.status)
+                        : task.status === value),
+                  ).length ?? '—'}
+                </span>
+              </Tabs.Tab>
+            ))}
+            {search.status &&
+              !downloadTabs.some((tab) => tab.value === search.status) && (
+                <Tabs.Tab
+                  value={search.status}
+                  className="shrink-0 rounded-md bg-muted px-3 py-1.5 text-sm font-medium"
+                >
+                  {statusLabels[search.status as keyof typeof statusLabels]}
+                </Tabs.Tab>
+              )}
+          </Tabs.List>
+        </DownloadsToolbar>
+        {queues.data
+          ?.filter(
+            (queue) =>
+              queue.paused &&
+              visible.some(
+                (task) =>
+                  task.status === 'queued' &&
+                  (optionsById.get(task.id)?.queueId ?? 'default') === queue.id,
+              ),
+          )
+          .map((queue) => (
+            <QueueStartNotice key={queue.id} queueId={queue.id} startNow />
+          ))}
+        <Tabs.Panel
+          value={search.status ?? 'all'}
+          className="flex min-h-0 flex-1 flex-col outline-none"
+        >
+          {options.isError && (
+            <div
+              role="alert"
+              className="flex items-center justify-between gap-3 rounded-md border p-3 text-sm"
+            >
+              <span>Queue, category and tag details could not be loaded.</span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void options.refetch()}
+              >
+                Retry organization details
+              </Button>
+            </div>
+          )}
+          {connection.unavailable && (
+            <div
+              role="status"
+              className="flex flex-wrap items-center justify-between gap-3 border bg-muted/40 p-3 text-sm"
+            >
+              <span>Live updates unavailable. Refresh to check progress.</span>
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => {
+                  connection.reconnect()
+                  void query.refetch()
+                }}
+              >
+                Reconnect
+              </Button>
+            </div>
+          )}
+          {query.isError && (
+            <DownloadsError
+              retry={() => void query.refetch()}
+              pending={query.isFetching}
+              background={query.data !== undefined}
+            />
+          )}
+          {query.isPending ? (
+            <DownloadsLoading />
+          ) : (
+            query.data && (
+              <div className="flex min-h-0 flex-1 flex-col bg-card">
+                {query.data.length === 0 ? (
+                  <div className="flex min-h-0 flex-1 flex-col">
+                    <DownloadsEmpty />
+                  </div>
+                ) : visible.length ? (
+                  <DownloadsTable
+                    tasks={visible}
+                    rowSelection={rowSelection}
+                    onRowSelectionChange={setRowSelection}
+                  />
+                ) : (
+                  <div className="flex flex-1 flex-col items-center justify-center gap-2 p-6 text-sm text-muted-foreground">
+                    <p>No downloads match these filters.</p>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => onSearchChange({})}
+                    >
+                      Show all downloads
+                    </Button>
+                  </div>
                 )}
-              </span>
-            </footer>
-          </div>
-        )
-      )}
+              </div>
+            )
+          )}
+        </Tabs.Panel>
+      </Tabs.Root>
       {detailsSlot}
     </section>
   )

@@ -121,7 +121,6 @@ pub struct DownloadTask {
     pub request_id: Option<String>,
     pub retry_count: u32,
     pub next_retry_at: Option<DateTime<Utc>>,
-    #[serde(skip)]
     pub queue_id: String,
     #[serde(skip)]
     pub queue_position: Option<i64>,

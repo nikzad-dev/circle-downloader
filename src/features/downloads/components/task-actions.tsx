@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   ExternalLink,
   FolderOpen,
+  MoreHorizontal,
   Pause,
   Play,
   RotateCcw,
@@ -19,6 +20,13 @@ import {
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from '@/components/ui/dropdown-menu'
 import { Label } from '@/components/ui/label'
 import { toast } from '@/components/ui/toast'
 import { orpc } from '@/lib/orpc/client'
@@ -40,7 +48,7 @@ export function TaskActions({
   const triggerRef = useRef<HTMLButtonElement>(null)
   const keepRef = useRef<HTMLButtonElement>(null)
   const lockRef = useRef(false)
-  const buttonSize = compact ? 'icon-xs' : 'icon-sm'
+  const buttonSize = compact ? 'xs' : 'icon-sm'
   const iconSize = compact ? 'size-3.5' : 'size-4'
   const mutation = useMutation({
     mutationFn: async (action: Action) => {
@@ -107,7 +115,8 @@ export function TaskActions({
         ] as const
       ).map(
         ([action, Icon, label]) =>
-          allowed[action] && (
+          allowed[action] &&
+          (!compact || action !== 'cancel') && (
             <Button
               key={action}
               variant="ghost"
@@ -118,6 +127,7 @@ export function TaskActions({
               onClick={() => void act(action)}
             >
               <Icon className={iconSize} aria-hidden="true" />
+              {compact && label}
             </Button>
           ),
       )}
@@ -130,34 +140,90 @@ export function TaskActions({
           onClick={() => void openOrReveal('open')}
         >
           <ExternalLink className={iconSize} aria-hidden="true" />
+          {compact && 'Open'}
         </Button>
       )}
-      {['completed', 'failed', 'paused', 'canceled'].includes(task.status) && (
+      {!compact &&
+        ['completed', 'failed', 'paused', 'canceled'].includes(task.status) && (
+          <Button
+            variant="ghost"
+            size={buttonSize}
+            title="Reveal folder"
+            aria-label={`Reveal folder for ${task.fileName}`}
+            onClick={() => void openOrReveal('reveal')}
+          >
+            <FolderOpen className={iconSize} aria-hidden="true" />
+          </Button>
+        )}
+      {!compact && (
         <Button
+          ref={triggerRef}
           variant="ghost"
           size={buttonSize}
-          title="Reveal folder"
-          aria-label={`Reveal folder for ${task.fileName}`}
-          onClick={() => void openOrReveal('reveal')}
+          title="Remove"
+          aria-label={`Remove ${task.fileName}`}
+          disabled={mutation.isPending}
+          onClick={() => {
+            mutation.reset()
+            setDeletePartial(true)
+            setConfirm(true)
+          }}
         >
-          <FolderOpen className={iconSize} aria-hidden="true" />
+          <Trash2 className={iconSize} aria-hidden="true" />
         </Button>
       )}
-      <Button
-        ref={triggerRef}
-        variant="ghost"
-        size={buttonSize}
-        title="Remove"
-        aria-label={`Remove ${task.fileName}`}
-        disabled={mutation.isPending}
-        onClick={() => {
-          mutation.reset()
-          setDeletePartial(true)
-          setConfirm(true)
-        }}
-      >
-        <Trash2 className={iconSize} aria-hidden="true" />
-      </Button>
+      {compact && (
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button
+                ref={triggerRef}
+                variant="ghost"
+                size="icon-xs"
+                aria-label={`More actions for ${task.fileName}`}
+                title="More actions"
+                disabled={mutation.isPending}
+              />
+            }
+          >
+            <MoreHorizontal className="size-4" aria-hidden="true" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent
+            align="end"
+            className="rounded-lg [&_[role=menuitem]]:rounded-md [&_[role=menuitem]]:text-sm [&_[role=menuitem]]:font-normal [&_[role=menuitem]]:tracking-normal [&_[role=menuitem]]:normal-case"
+          >
+            {['completed', 'failed', 'paused', 'canceled'].includes(
+              task.status,
+            ) && (
+              <DropdownMenuItem onClick={() => void openOrReveal('reveal')}>
+                <FolderOpen />
+                Reveal folder
+              </DropdownMenuItem>
+            )}
+            {allowed.cancel && (
+              <DropdownMenuItem onClick={() => void act('cancel')}>
+                <X />
+                Cancel download
+              </DropdownMenuItem>
+            )}
+            {(['completed', 'failed', 'paused', 'canceled'].includes(
+              task.status,
+            ) ||
+              allowed.cancel) && <DropdownMenuSeparator />}
+            <DropdownMenuItem
+              variant="destructive"
+              onClick={() => {
+                mutation.reset()
+                setDeletePartial(true)
+                setConfirm(true)
+              }}
+            >
+              <Trash2 />
+              Remove download…
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       <AlertDialog
         open={confirm}
         onOpenChange={(next) => {

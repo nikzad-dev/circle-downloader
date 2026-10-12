@@ -7,3 +7,5 @@ pub mod system;
 pub mod advanced;
 
 pub mod download_window;
+
+pub mod progress_window;

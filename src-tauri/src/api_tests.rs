@@ -2376,6 +2376,48 @@ async fn configured_creation_persists_controls_before_start_and_rejects_bad_opti
 }
 
 #[tokio::test]
+async fn new_download_in_paused_default_queue_starts_after_queue_resume() {
+    use crate::domain::advanced::TaskOptions;
+    let url = spawn_fixture_server(|_| (200, b"new download".to_vec())).await;
+    let (_dir, mgr) = manager();
+    let mut queue = mgr.queue_policies().unwrap().remove(0);
+    queue.paused = true;
+    mgr.save_queue(queue.clone()).await.unwrap();
+    let task = mgr
+        .create_configured(
+            CreateDownloadRequest {
+                url,
+                destination_id: None,
+                suggested_name: Some("new.bin".into()),
+                start_now: true,
+                request_id: None,
+                expected_sha256: None,
+            },
+            TaskOptions {
+                queue_id: queue.id.clone(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.status, DownloadStatus::Queued);
+    assert_eq!(task.downloaded_bytes, 0);
+    queue.paused = false;
+    mgr.save_queue(queue).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &task.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(3),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(mgr.get(&task.id).unwrap().final_path.unwrap()).unwrap(),
+        b"new download"
+    );
+}
+
+#[tokio::test]
 async fn categories_are_inferred_for_existing_tasks_and_each_bulk_file_with_manual_override() {
     use crate::application::manager::advanced::BulkImport;
     use crate::domain::advanced::TaskOptions;
@@ -2607,4 +2649,103 @@ async fn categorized_transfer_publishes_verified_bytes_inside_its_category() {
     );
     assert_eq!(done.checksum_result.as_deref(), Some("matched"));
     assert!(!std::path::Path::new(task.temp_path.as_ref().unwrap()).exists());
+}
+
+#[tokio::test]
+async fn queue_pause_stops_running_writers_and_resume_preserves_individual_pauses() {
+    use crate::domain::advanced::{QueuePolicy, TaskOptions};
+    let bytes: Vec<u8> = (0..512_000).map(|index| (index % 251) as u8).collect();
+    let url = spawn_slow_range_server(bytes.clone()).await;
+    let (_dir, mgr) = manager();
+    let mut queue = mgr.queue_policies().unwrap().remove(0);
+    queue.max_concurrent = 1;
+    mgr.save_queue(queue.clone()).await.unwrap();
+    let make_input = |name: &str, start_now| CreateDownloadRequest {
+        url: url.clone(),
+        destination_id: None,
+        suggested_name: Some(name.into()),
+        start_now,
+        request_id: None,
+        expected_sha256: None,
+    };
+    let running = mgr.create(make_input("running.bin", true)).unwrap();
+    let manual = mgr.create(make_input("manual.bin", false)).unwrap();
+    let waiting = mgr.create(make_input("waiting.bin", true)).unwrap();
+    let other_queue = mgr
+        .save_queue(QueuePolicy {
+            id: String::new(),
+            name: "Other".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let other = mgr
+        .create_configured(
+            make_input("other.bin", true),
+            TaskOptions {
+                queue_id: other_queue.id,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    wait_for_status(
+        &mgr,
+        &running.id,
+        &[DownloadStatus::Downloading],
+        Duration::from_secs(3),
+    )
+    .await;
+    wait_for_status(
+        &mgr,
+        &other.id,
+        &[DownloadStatus::Downloading],
+        Duration::from_secs(3),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(40)).await;
+    let position = mgr.get(&running.id).unwrap().queue_position;
+    queue.paused = true;
+    mgr.save_queue(queue.clone()).await.unwrap();
+    let stopped = mgr.get(&running.id).unwrap();
+    assert_eq!(stopped.status, DownloadStatus::Queued);
+    assert_eq!(stopped.queue_position, position);
+    assert_eq!(stopped.speed_bytes_per_second, 0);
+    assert!(stopped.downloaded_bytes > 0);
+    let partial = stopped.temp_path.unwrap();
+    let length = std::fs::metadata(&partial).unwrap().len();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    assert_eq!(
+        std::fs::metadata(&partial).unwrap().len(),
+        length,
+        "queue Pause must drain the active writer"
+    );
+    assert_eq!(mgr.get(&waiting.id).unwrap().status, DownloadStatus::Queued);
+    assert_eq!(mgr.get(&manual.id).unwrap().status, DownloadStatus::Paused);
+    assert!(matches!(
+        mgr.get(&other.id).unwrap().status,
+        DownloadStatus::Downloading | DownloadStatus::Completed
+    ));
+    queue.paused = false;
+    mgr.save_queue(queue).await.unwrap();
+    wait_for_status(
+        &mgr,
+        &running.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(5),
+    )
+    .await;
+    wait_for_status(
+        &mgr,
+        &waiting.id,
+        &[DownloadStatus::Completed],
+        Duration::from_secs(5),
+    )
+    .await;
+    assert_eq!(
+        std::fs::read(mgr.get(&running.id).unwrap().final_path.unwrap()).unwrap(),
+        bytes
+    );
+    assert_eq!(mgr.get(&manual.id).unwrap().status, DownloadStatus::Paused);
+    mgr.shutdown().await;
 }

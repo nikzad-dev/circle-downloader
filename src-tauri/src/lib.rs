@@ -3,6 +3,7 @@ mod commands;
 mod domain;
 mod infrastructure;
 mod ipc;
+mod tray;
 
 use application::DownloadManager;
 use infrastructure::db::Database;
@@ -10,8 +11,6 @@ use infrastructure::ownership::DataDirectoryLease;
 use ipc::progress::ProgressHub;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::menu::{Menu, MenuItem};
-use tauri::tray::TrayIconBuilder;
 use tauri::{Manager, RunEvent, WindowEvent};
 
 pub struct AppState {
@@ -90,31 +89,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .manage(commands::download_window::DownloadWindowState::default())
+        .manage(commands::progress_window::ProgressWindowState::default())
         .setup(move |app| {
-            let show = MenuItem::with_id(app, "show", "Show", true, None::<&str>)?;
-            let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&show, &quit])?;
-            let icon = app
-                .default_window_icon()
-                .cloned()
-                .ok_or("missing window icon")?;
-            let _tray = TrayIconBuilder::new()
-                .icon(icon)
-                .menu(&menu)
-                .tooltip("Circle Downloader")
-                .on_menu_event(|app, event| match event.id.as_ref() {
-                    "show" => {
-                        if let Some(window) = app.get_webview_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                    }
-                    "quit" => {
-                        app.exit(0);
-                    }
-                    _ => {}
-                })
-                .build(app)?;
+            tray::install(app)?;
             let _ = allow_exit_setup;
             Ok(())
         })
@@ -129,6 +106,16 @@ pub fn run() {
                     state,
                 );
             }
+            if window.label() == "download-progress"
+                && let WindowEvent::CloseRequested { api, .. } = event
+            {
+                api.prevent_close();
+                let state = window.state::<commands::progress_window::ProgressWindowState>();
+                let _ = commands::progress_window::close_progress_window(
+                    window.app_handle().clone(),
+                    state,
+                );
+            }
             if window.label() == "main"
                 && let WindowEvent::CloseRequested { api, .. } = event
             {
@@ -139,6 +126,9 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::system::health_check,
+            commands::progress_window::open_progress_window,
+            commands::progress_window::progress_window_ready,
+            commands::progress_window::close_progress_window,
             commands::download_window::open_download_window,
             commands::download_window::prepare_download_window,
             commands::download_window::download_window_ready,

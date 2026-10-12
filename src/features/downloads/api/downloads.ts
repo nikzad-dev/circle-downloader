@@ -1,6 +1,7 @@
 import type { QueryClient } from '@tanstack/react-query'
 import type { DownloadTask, ProgressEvent } from '@/lib/orpc/schemas'
 import { queryOptions, useQuery, useQueryClient } from '@tanstack/react-query'
+import { advancedKeys } from '@/features/advanced/api'
 import { orpc } from '@/lib/orpc/client'
 
 export const downloadsKey = orpc.downloads.list.key()
@@ -106,6 +107,8 @@ export function removeTask(client: QueryClient, id: string) {
   client.setQueryData<DownloadTask[]>(downloadsKey, (rows) =>
     rows?.filter((row) => row.id !== id),
   )
+  void client.invalidateQueries({ queryKey: advancedKeys.queues })
+  void client.invalidateQueries({ queryKey: advancedKeys.tasks })
 }
 export async function reconcileDownloads(client: QueryClient) {
   return client.invalidateQueries({ queryKey: downloadsKey })

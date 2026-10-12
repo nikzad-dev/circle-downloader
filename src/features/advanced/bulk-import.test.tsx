@@ -9,6 +9,7 @@ const invoke = vi.hoisted(() => vi.fn())
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
 it('deduplicates imports and includes tags, priority and explicit DST choice', async () => {
   invoke.mockImplementation(async (command) => {
+    if (command === 'open_progress_window') return undefined
     if (command === 'get_queue_policies')
       return [
         {
@@ -75,4 +76,5 @@ it('deduplicates imports and includes tags, priority and explicit DST choice', a
     },
   })
   expect(screen.getByLabelText('Download URLs')).toHaveValue('')
+  expect(invoke).toHaveBeenCalledWith('open_progress_window')
 })

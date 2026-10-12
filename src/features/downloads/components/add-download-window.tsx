@@ -13,6 +13,7 @@ import { toast } from '@/components/ui/toast'
 import { advanced, emptyTaskOptions } from '@/features/advanced/api'
 import { BulkImportForm } from '@/features/advanced/bulk-import'
 import { categoryFromSource } from '@/features/advanced/categories'
+import { QueueStartNotice } from '@/features/advanced/queue-start-notice'
 import {
   CategorySelect,
   selectClass,
@@ -22,6 +23,7 @@ import { orpc } from '@/lib/orpc/client'
 import { createFormSchema } from '../lib/create-form'
 import { downloadErrorMessage } from '../lib/errors'
 import { closeDownloadWindow } from './download-window-api'
+import { openProgressWindow } from './progress-window-api'
 
 interface WindowRequest {
   initialUrl: string
@@ -342,6 +344,7 @@ export function NewDownloadForm({
       )
       setAdded(true)
       await onDone()
+      if (values.startNow) void openProgressWindow()
     } catch (error) {
       form.setError('root', {
         message:
@@ -561,6 +564,11 @@ export function NewDownloadForm({
             </details>
           </div>
         </fieldset>
+        <QueueStartNotice
+          queueId={features.queue ? options.queueId : 'default'}
+          startNow={form.watch('startNow')}
+          disabled={pending || added}
+        />
         {added && (
           <p role="status" className="text-sm">
             Download added. You can close this window.

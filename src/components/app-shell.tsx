@@ -17,18 +17,21 @@ import {
   SheetTrigger,
 } from '@/components/ui/sheet'
 import { toast } from '@/components/ui/toast'
-import { BulkImportButton } from '@/features/advanced/bulk-import'
+// import { BulkImportButton } from '@/features/advanced/bulk-import'
 import { AddDownloadContext } from '@/features/downloads/components/add-download-context'
 import { openDownloadWindow } from '@/features/downloads/components/download-window-api'
 import { useDownloadDrop } from '@/features/downloads/hooks/use-download-drop'
 import { isEditableTarget } from '@/features/downloads/lib/input-target'
 import { pastedLinks } from '@/features/downloads/lib/pasted-links'
+import { ProgressWindowButton } from '@/features/downloads/components/progress-window-button'
 import { strings } from '@/lib/ui-strings'
 
 export function AppShell() {
   const dragging = useDownloadDrop()
   const { pathname } = useLocation()
   const isDownloads = pathname === '/' || pathname.startsWith('/downloads')
+  const hasSidebar = isDownloads || pathname.startsWith('/settings')
+  const sidebarLabel = isDownloads ? 'Organize downloads' : 'Settings sections'
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [mobileSidebarOpen, setMobileSidebarOpen] = useState(false)
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
@@ -105,11 +108,11 @@ export function AppShell() {
         >
           Skip to content
         </a>
-        <header className="z-20 flex h-12 shrink-0 items-center gap-2 border-b bg-background px-3 sm:px-4">
+        <header className="z-20 flex h-14 shrink-0 items-center gap-2 border-b bg-background px-3 sm:px-4">
           <Button
             variant="ghost"
             size="icon-sm"
-            className={isDownloads ? 'hidden md:inline-flex' : 'hidden'}
+            className={hasSidebar ? 'hidden md:inline-flex' : 'hidden'}
             aria-label={sidebarOpen ? 'Hide sidebar' : 'Show sidebar'}
             aria-expanded={sidebarOpen}
             aria-controls="download-sidebar"
@@ -123,7 +126,7 @@ export function AppShell() {
                 <Button
                   variant="ghost"
                   size="icon-sm"
-                  className={isDownloads ? 'md:hidden' : 'hidden'}
+                  className={hasSidebar ? 'md:hidden' : 'hidden'}
                   aria-label="Show sidebar"
                 />
               }
@@ -132,7 +135,7 @@ export function AppShell() {
             </SheetTrigger>
             <SheetContent side="left" className="w-64 max-w-[85%] gap-0">
               <SheetTitle className="px-6 py-5 text-sm tracking-normal normal-case">
-                Download filters
+                {sidebarLabel}
               </SheetTitle>
               <AppSidebar
                 id="mobile-download-sidebar"
@@ -151,8 +154,9 @@ export function AppShell() {
               strokeWidth={3}
               aria-hidden="true"
             />
-            <span className="hidden sm:inline">{strings.appName}</span>
+            <span className="hidden xl:inline">{strings.appName}</span>
           </Link>
+          <div className="mx-1 h-5 shrink-0 border-l" aria-hidden="true" />
           <AppMenubar />
           <Button
             onClick={() => add()}
@@ -164,7 +168,8 @@ export function AppShell() {
               {strings.addDownload}
             </span>
           </Button>
-          <BulkImportButton />
+          <ProgressWindowButton />
+          {/* <BulkImportButton /> */}
         </header>
         <div className="relative flex min-h-0 flex-1">
           <ResizablePanelGroup
@@ -173,11 +178,11 @@ export function AppShell() {
             defaultLayout={defaultLayout}
             onLayoutChanged={sidebarOpen ? onLayoutChanged : undefined}
           >
-            {sidebarOpen && isDownloads && (
+            {sidebarOpen && hasSidebar && (
               <>
                 <ResizablePanel
                   id="sidebar"
-                  defaultSize={188}
+                  defaultSize={208}
                   minSize={168}
                   maxSize={280}
                   className="hidden md:block"
@@ -185,7 +190,11 @@ export function AppShell() {
                   <AppSidebar />
                 </ResizablePanel>
                 <ResizableHandle
-                  aria-label="Resize download sidebar"
+                  aria-label={
+                    isDownloads
+                      ? 'Resize download sidebar'
+                      : 'Resize settings sidebar'
+                  }
                   className="hidden transition-colors hover:bg-ring md:flex"
                 />
               </>

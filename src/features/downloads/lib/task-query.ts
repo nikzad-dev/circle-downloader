@@ -1,6 +1,7 @@
 import type { TaskOptions } from '@/features/advanced/api'
 import type { DownloadStatus, DownloadTask } from '@/lib/orpc/schemas'
 import { z } from 'zod'
+import { activeStatuses } from './format'
 import { resolvedCategory } from '@/features/advanced/categories'
 import { downloadStatusSchema } from '@/lib/orpc/schemas'
 
@@ -17,7 +18,10 @@ export const downloadsSearchSchema = z.object({
   queueId: z.string().optional().catch(undefined),
   category: z.string().optional().catch(undefined),
   tag: z.string().optional().catch(undefined),
-  status: downloadStatusSchema.or(z.literal('all')).optional().catch('all'),
+  status: downloadStatusSchema
+    .or(z.enum(['all', 'active']))
+    .optional()
+    .catch('all'),
   sort: downloadsSortSchema.optional().catch('created_asc'),
 })
 
@@ -64,7 +68,12 @@ export function filterAndSortTasks(
       !controls?.tags.includes(search.tag)
     )
       return false
-    if (status !== 'all' && task.status !== status) return false
+    if (
+      status === 'active'
+        ? !activeStatuses.has(task.status)
+        : status !== 'all' && task.status !== status
+    )
+      return false
     if (!q) return true
     return (
       task.fileName.toLowerCase().includes(q) ||

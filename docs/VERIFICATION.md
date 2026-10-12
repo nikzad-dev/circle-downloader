@@ -105,7 +105,7 @@ Seven paired samples alternating connection counts on local test server:
 ## 6. Advanced Controls & Organization (N4B)
 
 ### Capabilities Delivered
-- **Queues & Bandwidth:** Named queues with custom worker caps, FIFO bandwidth rate limiters, and pause-new-starts toggles.
+- **Queues & Bandwidth:** Named queues with custom worker caps, FIFO bandwidth rate limiters, and pause/resume controls that drain active writers and preserve waiting intent.
 - **Priority Aging:** Priority levels weighted against wait time (1 priority step $\approx$ 2 minutes of queue wait) to prevent starvation.
 - **Scheduling:** One-shot schedules with explicit IANA time zones and daylight saving time (DST) gap rejection / fold disambiguation.
 - **Bulk Import:** Batch URL imports (up to 200 items) with deduplication, syntax validation, and atomic batch ID idempotency.

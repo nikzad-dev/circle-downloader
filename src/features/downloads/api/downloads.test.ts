@@ -92,3 +92,12 @@ describe('shared downloads cache', () => {
     client.clear()
   })
 })
+
+it('invalidates queue counts and membership when removing a download', () => {
+  const client = new QueryClient()
+  const invalidate = vi.spyOn(client, 'invalidateQueries')
+  removeTask(client, 'task-1')
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['advanced', 'queues'] })
+  expect(invalidate).toHaveBeenCalledWith({ queryKey: ['advanced', 'tasks'] })
+  client.clear()
+})

@@ -178,3 +178,24 @@ it('filters automatic categories from filenames while respecting explicit overri
     ),
   ).toEqual(['manual', 'pdf'])
 })
+
+it('groups queued, connecting, downloading and verifying under Active', () => {
+  const tasks = [
+    'queued',
+    'connecting',
+    'downloading',
+    'verifying',
+    'paused',
+    'completed',
+    'failed',
+    'canceled',
+  ].map((status, index) =>
+    task({
+      id: String(index),
+      status: status as ReturnType<typeof task>['status'],
+    }),
+  )
+  expect(
+    filterAndSortTasks(tasks, { status: 'active' }).map((task) => task.status),
+  ).toEqual(['queued', 'connecting', 'downloading', 'verifying'])
+})

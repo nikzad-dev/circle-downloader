@@ -1,15 +1,5 @@
 import { Link, useLocation, useSearch } from '@tanstack/react-router'
-import {
-  ArrowDown,
-  CheckCheck,
-  CircleAlert,
-  Clock,
-  Download,
-  LoaderCircle,
-  Pause,
-  ShieldCheck,
-  X,
-} from 'lucide-react'
+import { FolderOpen } from 'lucide-react'
 import { useMemo } from 'react'
 import {
   Accordion,
@@ -23,22 +13,10 @@ import {
   resolvedCategory,
 } from '@/features/advanced/categories'
 import { useDownloads } from '@/features/downloads/api/downloads'
-import { statusLabels } from '@/features/downloads/lib/format'
-
-const categories = [
-  { status: 'all', label: 'All downloads', icon: Download },
-  { status: 'downloading', label: statusLabels.downloading, icon: ArrowDown },
-  { status: 'queued', label: statusLabels.queued, icon: Clock },
-  { status: 'connecting', label: statusLabels.connecting, icon: LoaderCircle },
-  { status: 'paused', label: statusLabels.paused, icon: Pause },
-  { status: 'verifying', label: statusLabels.verifying, icon: ShieldCheck },
-  { status: 'completed', label: statusLabels.completed, icon: CheckCheck },
-  { status: 'failed', label: statusLabels.failed, icon: CircleAlert },
-  { status: 'canceled', label: statusLabels.canceled, icon: X },
-] as const
+import { settingsSections } from '@/features/settings/lib/sections'
 
 const linkClass =
-  'flex min-h-8 items-center gap-2 rounded-sm px-2.5 text-xs text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring [&.active]:bg-sidebar-accent [&.active]:font-medium [&.active]:text-foreground'
+  'flex min-h-9 items-center gap-2 rounded-md px-3 text-sm text-muted-foreground transition-colors hover:bg-sidebar-accent hover:text-foreground focus-visible:outline-2 focus-visible:outline-ring [&.active]:bg-sidebar-accent [&.active]:font-medium [&.active]:text-foreground'
 
 export function AppSidebar({
   onNavigate,
@@ -46,6 +24,58 @@ export function AppSidebar({
 }: {
   onNavigate?: () => void
   id?: string
+}) {
+  const { pathname } = useLocation()
+  return pathname.startsWith('/settings') ? (
+    <SettingsSidebar id={id} onNavigate={onNavigate} />
+  ) : (
+    <DownloadSidebar id={id} onNavigate={onNavigate} />
+  )
+}
+function SettingsSidebar({
+  id,
+  onNavigate,
+}: {
+  id: string
+  onNavigate?: () => void
+}) {
+  const search = useSearch({ strict: false })
+  return (
+    <aside
+      id={id}
+      aria-label="Settings sections"
+      className="h-full overflow-y-auto bg-sidebar p-3"
+    >
+      <p className="px-3 py-3 text-xs font-semibold text-muted-foreground">
+        Settings
+      </p>
+      <nav aria-label="Settings navigation" className="space-y-1">
+        {settingsSections.map(({ id, label, icon: Icon }) => (
+          <Link
+            key={id}
+            to="/settings"
+            search={{ section: id }}
+            onClick={onNavigate}
+            aria-current={
+              (search.section ?? 'general') === id ? 'page' : undefined
+            }
+            activeOptions={{ includeSearch: true }}
+            className={`${linkClass} ${(search.section ?? 'general') === id ? 'active' : ''}`}
+          >
+            <Icon className="size-4" aria-hidden="true" />
+            {label}
+          </Link>
+        ))}
+      </nav>
+    </aside>
+  )
+}
+function DownloadSidebar({
+  id,
+  onNavigate,
+}: {
+  id: string
+  onNavigate?: () => void
 }) {
   const query = useDownloads()
   const controls = useTaskOptions()
@@ -74,39 +104,6 @@ export function AppSidebar({
   const { pathname } = useLocation()
   const search = useSearch({ strict: false })
   const inDownloads = pathname === '/' || pathname.startsWith('/downloads')
-  const selected = search.status ?? 'all'
-  const categoryLink = ({
-    status,
-    label,
-    icon: Icon,
-  }: (typeof categories)[number]) => {
-    const active = inDownloads && selected === status
-    const count = query.data?.filter(
-      (task) => status === 'all' || task.status === status,
-    ).length
-    return (
-      <Link
-        key={status}
-        to="/downloads"
-        search={{
-          q: search.q,
-          sort: search.sort,
-          status: status === 'all' ? undefined : status,
-        }}
-        onClick={onNavigate}
-        activeOptions={{ exact: true, includeSearch: true }}
-        activeProps={{ 'aria-current': active ? 'page' : undefined }}
-        aria-current={active ? 'page' : undefined}
-        className={`${linkClass} ${active ? 'active' : ''}`}
-      >
-        <Icon className="size-4 shrink-0" aria-hidden="true" />
-        <span className="truncate">{label}</span>
-        <span className="ml-auto text-xs text-muted-foreground tabular-nums">
-          {count ?? '—'}
-        </span>
-      </Link>
-    )
-  }
   return (
     <aside
       id={id}
@@ -114,14 +111,24 @@ export function AppSidebar({
       className="h-full overflow-y-auto bg-sidebar p-2"
     >
       <nav aria-label="Download categories" className="space-y-2">
-        {categoryLink(categories[0])}
-        <p className="px-2.5 pt-3 pb-1 text-[11px] font-medium text-muted-foreground">
-          Status
-        </p>
-        <div className="space-y-0.5">
-          {categories.slice(1).map(categoryLink)}
+        <div className="flex items-center gap-2 px-2.5 py-3 text-xs font-semibold text-muted-foreground">
+          <FolderOpen className="size-4" aria-hidden="true" />
+          Organize files
         </div>
-        <Accordion defaultValue={['categories']}>
+        <Link
+          to="/downloads"
+          search={{ q: search.q, sort: search.sort, status: search.status }}
+          onClick={onNavigate}
+          className={`${linkClass} ${!search.queueId && !search.category && !search.tag ? 'active' : ''}`}
+          aria-current={
+            !search.queueId && !search.category && !search.tag
+              ? 'page'
+              : undefined
+          }
+        >
+          All files
+        </Link>
+        <Accordion defaultValue={['queues', 'categories']}>
           <AccordionItem value="queues">
             <AccordionTrigger>Queues</AccordionTrigger>
             <AccordionContent className="space-y-0.5 pl-2">
@@ -129,7 +136,7 @@ export function AppSidebar({
                 <Link
                   key={queue.id}
                   to="/downloads"
-                  search={{ queueId: queue.id }}
+                  search={{ ...search, queueId: queue.id }}
                   onClick={onNavigate}
                   aria-current={
                     inDownloads && search.queueId === queue.id
@@ -158,10 +165,17 @@ export function AppSidebar({
                     to="/downloads"
                     search={
                       group === 'categories'
-                        ? { category: label }
-                        : { tag: label }
+                        ? { ...search, category: label }
+                        : { ...search, tag: label }
                     }
                     onClick={onNavigate}
+                    aria-current={
+                      (group === 'categories'
+                        ? search.category
+                        : search.tag) === label
+                        ? 'page'
+                        : undefined
+                    }
                     className={`${linkClass} ${inDownloads && (group === 'categories' ? search.category : search.tag) === label ? 'active' : ''}`}
                   >
                     <span className="truncate">{label}</span>
@@ -172,8 +186,7 @@ export function AppSidebar({
                 ))}
                 {organization[group].length === 0 && (
                   <p className="px-2 text-xs text-muted-foreground">
-                    Assign
-                    {group} in download details.
+                    Assign {group} in download details.
                   </p>
                 )}
                 {organization[group].length > 50 && (

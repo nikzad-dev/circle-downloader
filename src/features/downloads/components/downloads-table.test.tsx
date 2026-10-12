@@ -46,7 +46,7 @@ it('distinguishes a calculated digest from a matched expected checksum', () => {
   expect(screen.getAllByText(digest)).toHaveLength(2)
 })
 
-it('renders size, date added columns, and handles empty state', () => {
+it('groups file and transfer details into a focused table and handles empty state', () => {
   const client = new QueryClient()
   const { rerender } = render(
     <QueryClientProvider client={client}>
@@ -64,12 +64,18 @@ it('renders size, date added columns, and handles empty state', () => {
     </QueryClientProvider>,
   )
 
-  expect(screen.getByRole('columnheader', { name: 'Size' })).toBeInTheDocument()
+  expect(screen.getAllByRole('columnheader')).toHaveLength(6)
   expect(
-    screen.getByRole('columnheader', { name: 'Date added' }),
+    screen.getByRole('columnheader', { name: 'Progress' }),
   ).toBeInTheDocument()
-  expect(screen.getByText('5 MB')).toBeInTheDocument()
-  expect(screen.getByRole('cell', { name: /2026/ })).toBeInTheDocument()
+  expect(
+    screen.getByRole('columnheader', { name: 'Transfer' }),
+  ).toBeInTheDocument()
+  expect(
+    screen.queryByRole('columnheader', { name: 'Date added' }),
+  ).not.toBeInTheDocument()
+  expect(screen.getByText(/of 5 MB/)).toBeInTheDocument()
+  expect(screen.getByText('example.com')).toBeInTheDocument()
 
   rerender(
     <QueryClientProvider client={client}>

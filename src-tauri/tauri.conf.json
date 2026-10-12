@@ -1,6 +1,6 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "circle-downloader",
+  "productName": "Circle Downloader",
   "version": "0.1.0",
   "identifier": "com.circle.circle-downloader",
   "build": {
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "circle-downloader",
+        "title": "Circle Downloader",
         "width": 800,
         "height": 600,
         "dragDropEnabled": false

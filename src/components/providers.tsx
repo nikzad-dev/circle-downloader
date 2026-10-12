@@ -12,6 +12,10 @@ const AddDownloadWindow = lazy(async () => {
     await import('@/features/downloads/components/add-download-window')
   return { default: module.DownloadWindowHost }
 })
+const ProgressWindow = lazy(async () => {
+  const module = await import('@/features/downloads/components/progress-window')
+  return { default: module.ProgressWindowHost }
+})
 const windowParams = new URLSearchParams(window.location.search)
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -32,7 +36,11 @@ declare module '@tanstack/react-router' {
 }
 export function AppProviders() {
   useEffect(() => {
-    if (windowParams.get('downloadWindow') === '1') return
+    if (
+      windowParams.get('downloadWindow') === '1' ||
+      windowParams.get('progressWindow') === '1'
+    )
+      return
     // Prepare after the main UI paints, outside the Add button's critical path.
     const timer = window.setTimeout(() => {
       void invoke('prepare_download_window').catch(() => {})
@@ -45,6 +53,10 @@ export function AppProviders() {
         {windowParams.get('downloadWindow') === '1' ? (
           <Suspense fallback={null}>
             <AddDownloadWindow />
+          </Suspense>
+        ) : windowParams.get('progressWindow') === '1' ? (
+          <Suspense fallback={null}>
+            <ProgressWindow />
           </Suspense>
         ) : (
           <DownloadProgressProvider>

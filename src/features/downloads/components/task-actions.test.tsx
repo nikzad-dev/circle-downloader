@@ -9,13 +9,13 @@ import { TaskActions } from './task-actions'
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }))
 vi.mock('@tauri-apps/api/core', () => ({ invoke }))
-function setup(status: DownloadStatus = 'downloading') {
+function setup(status: DownloadStatus = 'downloading', compact = false) {
   const client = new QueryClient()
   const row = task({ status })
   mergeTask(client, row)
   render(
     <QueryClientProvider client={client}>
-      <TaskActions task={row} />
+      <TaskActions task={row} compact={compact} />
     </QueryClientProvider>,
   )
   return { client, user: userEvent.setup() }
@@ -134,4 +134,40 @@ describe('task actions', () => {
       ).toBeEnabled(),
     )
   })
+})
+
+it('keeps the main action visible and requires confirmation for compact menu removal', async () => {
+  const { user } = setup('paused', true)
+  expect(
+    screen.getByRole('button', { name: 'Resume file.zip' }),
+  ).toHaveTextContent('Resume')
+  expect(
+    screen.queryByRole('button', { name: 'Remove file.zip' }),
+  ).not.toBeInTheDocument()
+  await user.click(
+    screen.getByRole('button', { name: 'More actions for file.zip' }),
+  )
+  expect(
+    await screen.findByRole('menuitem', { name: 'Reveal folder' }),
+  ).toBeInTheDocument()
+  await user.click(screen.getByRole('menuitem', { name: 'Remove download…' }))
+  expect(await screen.findByRole('alertdialog')).toBeInTheDocument()
+  expect(invoke).not.toHaveBeenCalled()
+  await user.click(screen.getByRole('button', { name: 'Keep download' }))
+  await waitFor(() =>
+    expect(screen.queryByRole('alertdialog')).not.toBeInTheDocument(),
+  )
+})
+it('exposes cancel in the compact action menu', async () => {
+  invoke.mockResolvedValue(task({ status: 'canceled', revision: 2 }))
+  const { user } = setup('downloading', true)
+  await user.click(
+    screen.getByRole('button', { name: 'More actions for file.zip' }),
+  )
+  await user.click(
+    await screen.findByRole('menuitem', { name: 'Cancel download' }),
+  )
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith('cancel_download', { id: 'task-1' }),
+  )
 })

@@ -80,12 +80,59 @@ impl DownloadManager {
     }
     pub async fn save_queue(&self, mut policy: QueuePolicy) -> Result<QueuePolicy, AppError> {
         policy.validate()?;
+        // Serialize queue pauses with individual pause/resume/remove operations.
+        let _control = self.inner.controls.lock().await;
         if policy.id.is_empty() {
             policy.id = Uuid::new_v4().to_string();
         }
-        {
+        let stopped = {
             let _dispatch = self.inner.dispatch_lock.lock();
+            let _mutation = self.inner.mutations.lock();
             self.inner.db.save_queue(&policy)?;
+            let mut stopped = Vec::new();
+            if policy.paused {
+                for mut task in self.inner.db.list_downloads()? {
+                    if task.queue_id != policy.id
+                        || !matches!(
+                            task.status,
+                            DownloadStatus::Queued
+                                | DownloadStatus::Connecting
+                                | DownloadStatus::Downloading
+                        )
+                        || !self.inner.workers.lock().contains_key(&task.id)
+                    {
+                        continue;
+                    }
+                    // Block worker callbacks before canceling. Retain queue position
+                    // so queue Resume keeps intent and FIFO order; user-paused files
+                    // are never included here. Verification/publication can finish.
+                    task.status = DownloadStatus::Paused;
+                    task.speed_bytes_per_second = 0;
+                    task.bump_revision();
+                    self.inner.db.upsert_download(&task)?;
+                    self.emit_progress(&task);
+                    stopped.push(task.id);
+                }
+                let workers = self.inner.workers.lock();
+                for id in &stopped {
+                    if let Some(worker) = workers.get(id) {
+                        let _ = worker.cancel_tx.send(true);
+                    }
+                }
+            }
+            stopped
+        };
+        for id in stopped {
+            self.stop_worker(&id).await;
+            self.refresh_partial(&id)?;
+            let _mutation = self.inner.mutations.lock();
+            let mut task = self.inner.db.get_download(&id)?;
+            ensure_transition(task.status, DownloadStatus::Queued)?;
+            task.status = DownloadStatus::Queued;
+            task.speed_bytes_per_second = 0;
+            task.bump_revision();
+            self.inner.db.upsert_download(&task)?;
+            self.emit_progress(&task);
         }
         if let Some(limit) = self.inner.queue_limits.lock().get(&policy.id) {
             limit.set_rate(policy.bytes_per_second);

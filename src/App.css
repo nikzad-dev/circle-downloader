@@ -179,15 +179,8 @@
   position: sticky;
   top: 0;
   z-index: 10;
-  background: var(--sidebar);
+  background: var(--background);
   box-shadow: 0 1px 0 var(--border);
-}
-.downloads-grid th + th,
-.downloads-grid td + td {
-  border-left: 1px solid color-mix(in oklab, var(--border) 65%, transparent);
-}
-.downloads-grid tbody .download-row:nth-child(even) {
-  background: color-mix(in oklab, var(--muted) 28%, var(--card));
 }
 .downloads-grid tbody .download-row:hover {
   background: var(--accent);
@@ -211,11 +204,9 @@
 .downloads-grid {
   container-type: inline-size;
 }
-@container (max-width: 1199px) {
-  .downloads-grid [data-column='dateAdded'],
-  .downloads-grid [data-column='description'],
-  .downloads-grid .download-date-column,
-  .downloads-grid .download-description-column {
+@container (max-width: 850px) {
+  .downloads-grid [data-column='transfer'],
+  .downloads-grid .download-transfer-column {
     display: none;
   }
 }

@@ -8,7 +8,9 @@ import {
   closeDownloadWindow,
   openDownloadWindow,
 } from '@/features/downloads/components/download-window-api'
+import { openProgressWindow } from '@/features/downloads/components/progress-window-api'
 import { advanced, advancedKeys, emptyTaskOptions } from './api'
+import { QueueStartNotice } from './queue-start-notice'
 import { CategorySelect, TaskOptionsForm } from './task-options-form'
 
 export function BulkImportButton() {
@@ -72,6 +74,7 @@ export function BulkImportForm({
         startNow,
         batchId: batchRef.current,
       })
+      if (startNow && result.created.length > 0) void openProgressWindow()
       setMessage(
         `Imported ${result.created.length} downloads.${result.errors.length ? ` ${result.errors.join(' ')}` : ''}`,
       )
@@ -214,6 +217,11 @@ export function BulkImportForm({
             </div>
           </details>
         </div>
+        <QueueStartNotice
+          queueId={features.queue ? options.queueId : 'default'}
+          startNow={startNow}
+          disabled={pending}
+        />
         {message !== '' && (
           <p role="status" className="text-sm">
             {message}

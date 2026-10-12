@@ -229,3 +229,15 @@ Resume planning follows [RFC 9110 range semantics](https://www.rfc-editor.org/rf
 ### Link drag-and-drop (2026-10-12)
 
 Implemented external browser-link and URL-text drops in the main workspace with an overlay, copy feedback, URI-list/Firefox parsing, deduplication, import limits and existing download-window draft protection. Invalid drops cannot navigate the workspace. Inputs, dialogs and internal drags retain their behavior. Evidence: `dropped-links.test.ts`, `use-download-drop.test.tsx`, and shell integration tests. Frontend build and tests verified; physical cross-app drops on Windows/Linux remain part of release QA.
+
+### Native progress window (2026-10-12)
+
+Implemented a reusable toolbar progress window with an active-transfer count, automatic opening for immediately started downloads/imports, live transfer cards, aggregate speed, state-aware actions, remaining-time estimates and recent completed history. Hidden windows dispose their IPC progress listener and polling; reopening refreshes and reconnects. Evidence: progress-window UI/lifecycle/API tests, transfer-summary tests, toolbar and download-creation tests. Verified frontend build, 164 frontend tests, 130 Rust tests, strict Clippy, debug macOS app packaging, light/dark/minimum-width rendering, and a real isolated localhost transfer with pause/resume and close/reopen continuity. Windows/Linux native smoke remains release QA.
+
+### Tray progress shortcut (2026-10-12)
+
+Added an event-driven Download progress tray item between Show and Quit while transfers are active. It reuses the native progress window and works with hidden app windows. Revision-aware tracking ignores stale events and keeps the shortcut until the last active transfer stops. Evidence: native tracker tests for concurrent transfers, pause/resume, verification, completion, cancellation, failure and stale revisions.
+
+### Paused queue guidance (2026-10-12)
+
+Progress cards identify a paused queue and offer Resume queue while retaining its concurrency and bandwidth settings. Public download payloads include the queue ID, with the shared IPC fixture updated. Unknown totals use one readable size-pending message; queued tasks show a stationary progress track without empty speed/ETA fields. Verified 188 frontend tests, 135 native tests and frontend build; lint has no errors and two existing library warnings.

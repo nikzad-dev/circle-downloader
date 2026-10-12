@@ -28,12 +28,8 @@ import {
   TableRow,
 } from '@/components/ui/table'
 import { downloadErrorMessage } from '../lib/errors'
-import {
-  formatBytes,
-  formatDate,
-  formatSpeed,
-  statusLabels,
-} from '../lib/format'
+import { formatBytes, formatSpeed, statusLabels } from '../lib/format'
+import { transferTimeLeft } from '../lib/transfer-summary'
 import { ProgressCell } from './progress-cell'
 import { TaskActions } from './task-actions'
 
@@ -88,99 +84,33 @@ export function DownloadsTable({
         cell: ({ row }) => {
           const task = row.original
           return (
-            <div className="flex min-w-0 items-center gap-2">
-              <FileIcon name={task.fileName} />
-              <Link
-                to="/downloads/$downloadId"
-                params={{ downloadId: task.id }}
-                className="block min-w-0 truncate text-xs font-medium underline-offset-4 hover:underline focus-visible:outline-2 focus-visible:outline-ring"
-                title={task.fileName}
-              >
-                {task.fileName}
-              </Link>
+            <div className="flex min-w-0 items-center gap-3">
+              <div className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-muted/60">
+                <FileIcon name={task.fileName} />
+              </div>
+              <div className="min-w-0 flex-1">
+                <Link
+                  to="/downloads/$downloadId"
+                  params={{ downloadId: task.id }}
+                  className="block truncate text-sm font-medium hover:underline focus-visible:outline-2 focus-visible:outline-ring"
+                  title={task.fileName}
+                >
+                  {task.fileName}
+                </Link>
+                <p
+                  className="mt-1 truncate text-xs text-muted-foreground"
+                  title={sourceHost(task.url)}
+                >
+                  {sourceHost(task.url)}
+                </p>
+              </div>
             </div>
-          )
-        },
-      }),
-      helper.display({
-        id: 'size',
-        header: 'Size',
-        cell: ({ row }) => {
-          const bytes =
-            row.original.totalBytes ??
-            (row.original.status === 'completed'
-              ? row.original.downloadedBytes
-              : null)
-          return (
-            <span className="tabular-nums">
-              {bytes !== null ? formatBytes(bytes) : '—'}
-            </span>
           )
         },
       }),
       helper.display({
         id: 'status',
         header: 'Status',
-        cell: ({ row }) => (
-          <span
-            className="inline-flex items-center gap-1.5"
-            data-download-status={row.original.status}
-            title={
-              row.original.error
-                ? downloadErrorMessage(row.original.error)
-                : undefined
-            }
-          >
-            <span
-              className="status-dot size-1.5 shrink-0 rounded-full bg-current"
-              aria-hidden="true"
-            />
-            {statusLabels[row.original.status]}
-          </span>
-        ),
-      }),
-      helper.display({
-        id: 'progress',
-        header: 'Progress',
-        cell: ({ row }) => <ProgressCell task={row.original} compact />,
-      }),
-      helper.display({
-        id: 'speed',
-        header: 'Speed',
-        cell: ({ row }) => (
-          <span className="tabular-nums">
-            {row.original.status === 'downloading'
-              ? formatSpeed(row.original.speedBytesPerSecond)
-              : '—'}
-          </span>
-        ),
-      }),
-      helper.display({
-        id: 'remaining',
-        header: 'Time left',
-        cell: ({ row }) => (
-          <span className="tabular-nums">{timeLeft(row.original)}</span>
-        ),
-      }),
-      helper.display({
-        id: 'dateAdded',
-        header: 'Date added',
-        cell: ({ row }) => {
-          const dateStr = row.original.createdAt
-          return (
-            <span
-              className="text-xs text-muted-foreground tabular-nums whitespace-nowrap"
-              title={new Date(dateStr).toLocaleString()}
-            >
-              {formatDate(dateStr)}
-            </span>
-          )
-        },
-      }),
-
-      helper.display({
-        id: 'description',
-        header: 'Description',
         cell: ({ row }) => {
           const task = row.original
           const description = task.error
@@ -197,17 +127,77 @@ export function DownloadsTable({
                   ? 'Waiting for a free download slot'
                   : sourceHost(task.url)
           return (
-            <span
-              className="block truncate text-muted-foreground"
-              title={[description, task.actualSha256]
-                .filter(Boolean)
-                .join(' · ')}
-            >
-              {description}
-              {task.actualSha256 && (
-                <span className="sr-only">{task.actualSha256}</span>
+            <div className="space-y-1.5">
+              <span
+                className="inline-flex items-center gap-1.5 rounded-full bg-muted/60 px-2 py-1 text-xs font-medium"
+                data-download-status={task.status}
+              >
+                <span
+                  className="size-1.5 shrink-0 rounded-full bg-current"
+                  aria-hidden="true"
+                />
+                {statusLabels[task.status]}
+              </span>
+              {(task.error ||
+                task.actualSha256 ||
+                task.nextRetryAt ||
+                task.status === 'queued') && (
+                <p
+                  className="line-clamp-2 text-xs leading-relaxed text-muted-foreground"
+                  title={[description, task.actualSha256]
+                    .filter(Boolean)
+                    .join(' · ')}
+                >
+                  {description}
+                  {task.actualSha256 && (
+                    <span className="sr-only">{task.actualSha256}</span>
+                  )}
+                </p>
               )}
-            </span>
+            </div>
+          )
+        },
+      }),
+      helper.display({
+        id: 'progress',
+        header: 'Progress',
+        cell: ({ row }) => {
+          const task = row.original
+          return (
+            <div className="space-y-1.5">
+              <ProgressCell task={task} compact />
+              <p className="text-xs text-muted-foreground tabular-nums">
+                {formatBytes(task.downloadedBytes)}
+                {task.totalBytes !== null
+                  ? ` of ${formatBytes(task.totalBytes)}`
+                  : task.status === 'completed'
+                    ? ''
+                    : ' · Size unknown'}
+              </p>
+            </div>
+          )
+        },
+      }),
+      helper.display({
+        id: 'transfer',
+        header: 'Transfer',
+        cell: ({ row }) => {
+          const task = row.original
+          return (
+            <div className="space-y-1 text-xs tabular-nums">
+              <p>
+                {task.status === 'downloading'
+                  ? formatSpeed(task.speedBytesPerSecond)
+                  : '—'}
+              </p>
+              <p className="text-muted-foreground">
+                {task.status === 'downloading'
+                  ? `${transferTimeLeft(task)} left`
+                  : task.status === 'completed'
+                    ? 'Finished'
+                    : 'Not transferring'}
+              </p>
+            </div>
           )
         },
       }),
@@ -248,7 +238,7 @@ export function DownloadsTable({
   const virtualizer = useVirtualizer({
     count: rows.length,
     getScrollElement: () => parentRef.current,
-    estimateSize: () => 36,
+    estimateSize: () => 64,
     overscan: 8,
     enabled: virtualize,
   })
@@ -298,7 +288,7 @@ export function DownloadsTable({
                   key={cell.id}
                   data-column={cell.column.id}
                   className={cn(
-                    'h-9 py-1 px-2.5 text-xs',
+                    'h-16 px-4 py-2.5 text-sm',
                     cell.column.id === 'actions' && 'text-right',
                     cell.column.id === 'size' && 'text-right',
                     cell.column.id === 'select' && 'w-10 px-2 text-center',
@@ -336,7 +326,7 @@ export function DownloadsTable({
                 key={cell.id}
                 data-column={cell.column.id}
                 className={cn(
-                  'h-9 py-1 px-2.5 text-xs',
+                  'h-16 px-4 py-2.5 text-sm',
                   cell.column.id === 'actions' && 'text-right',
                   cell.column.id === 'size' && 'text-right',
                   cell.column.id === 'select' && 'w-10 px-2 text-center',
@@ -355,18 +345,14 @@ export function DownloadsTable({
       ref={parentRef}
       className="downloads-grid min-h-0 flex-1 overflow-auto"
     >
-      <Table className="min-w-[900px] table-fixed">
+      <Table className="min-w-[700px] table-fixed">
         <colgroup>
           {showSelection && <col style={{ width: 36 }} />}
-          <col style={{ width: 260 }} />
-          <col style={{ width: 86 }} />
-          <col style={{ width: 116 }} />
-          <col style={{ width: 142 }} />
-          <col style={{ width: 98 }} />
-          <col style={{ width: 80 }} />
-          <col className="download-date-column" style={{ width: 162 }} />
-          <col className="download-description-column" style={{ width: 150 }} />
-          <col style={{ width: 116 }} />
+          <col />
+          <col style={{ width: 140 }} />
+          <col style={{ width: 170 }} />
+          <col className="download-transfer-column" style={{ width: 110 }} />
+          <col style={{ width: 110 }} />
         </colgroup>
         <TableCaption className="sr-only">
           Download status, progress and available actions
@@ -380,7 +366,7 @@ export function DownloadsTable({
                   data-column={header.column.id}
                   scope="col"
                   className={cn(
-                    'h-8 px-2.5 text-xs font-medium tracking-normal normal-case',
+                    'h-10 px-4 text-xs font-medium tracking-normal normal-case',
                     header.column.id === 'actions' && 'text-right',
                     header.column.id === 'size' && 'text-right',
                     header.column.id === 'select' && 'w-10 px-2 text-center',
@@ -404,22 +390,6 @@ function sourceHost(url: string) {
   } catch {
     return url
   }
-}
-
-function timeLeft(task: DownloadTask) {
-  if (
-    task.status !== 'downloading' ||
-    task.totalBytes === null ||
-    task.speedBytesPerSecond <= 0
-  )
-    return '—'
-  const seconds = Math.ceil(
-    Math.max(0, task.totalBytes - task.downloadedBytes) /
-      task.speedBytesPerSecond,
-  )
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
 }
 
 function FileIcon({ name }: { name: string }) {

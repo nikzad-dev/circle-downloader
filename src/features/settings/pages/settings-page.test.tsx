@@ -47,7 +47,7 @@ async function setup() {
   render(
     <ThemeProvider>
       <QueryClientProvider client={client}>
-        <SettingsPage />
+        <SettingsPage section="downloads" />
       </QueryClientProvider>
     </ThemeProvider>,
   )

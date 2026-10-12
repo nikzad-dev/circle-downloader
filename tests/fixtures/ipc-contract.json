@@ -4,6 +4,7 @@
     "url": "https://example.com/",
     "fileName": "contract.bin",
     "destinationId": "default",
+    "queueId": "default",
     "status": "failed",
     "downloadedBytes": 4096,
     "totalBytes": null,

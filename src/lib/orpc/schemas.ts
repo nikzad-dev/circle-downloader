@@ -60,6 +60,7 @@ export const downloadTaskSchema = z.object({
   url: z.string().url(),
   fileName: z.string().min(1),
   destinationId: z.string().min(1),
+  queueId: z.string().min(1).optional(),
   status: downloadStatusSchema,
   downloadedBytes: safeByteCount,
   totalBytes: safeByteCount.nullable(),

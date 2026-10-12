@@ -12,6 +12,7 @@ export function task(overrides: Partial<DownloadTask> = {}): DownloadTask {
     url: 'https://example.com/file.zip',
     fileName: 'file.zip',
     destinationId: 'default',
+    queueId: 'default',
     status: 'downloading',
     downloadedBytes: 100,
     totalBytes: 1000,

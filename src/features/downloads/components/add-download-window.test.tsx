@@ -46,6 +46,7 @@ function setup() {
   return { user: userEvent.setup(), done }
 }
 function support(command: string) {
+  if (command === 'open_progress_window') return undefined
   if (command === 'list_destinations')
     return [
       {
@@ -83,6 +84,72 @@ beforeEach(() => {
   )
 })
 describe('compact download window', () => {
+  it('exposes and resumes the paused default queue even with organization hidden', async () => {
+    let paused = true
+    const queue = () => ({
+      id: 'default',
+      name: 'Downloads',
+      paused,
+      maxConcurrent: 3,
+      bytesPerSecond: 0,
+      taskCount: 1,
+    })
+    invoke.mockImplementation(async (command: string, args: unknown) => {
+      if (command === 'get_queue_policies') return [queue()]
+      if (command === 'save_queue_policy') {
+        expect(args).toEqual({ input: { ...queue(), paused: false } })
+        paused = false
+        return queue()
+      }
+      if (command === 'create_configured_download') return task()
+      return support(command)
+    })
+    const { user, done } = setup()
+    expect(await screen.findByText('Downloads queue is paused')).toBeVisible()
+    await user.click(screen.getByRole('button', { name: 'Resume queue' }))
+    await waitFor(() =>
+      expect(
+        screen.queryByText('Downloads queue is paused'),
+      ).not.toBeInTheDocument(),
+    )
+    await user.type(
+      screen.getByLabelText('Download URL'),
+      'https://example.com/file.zip',
+    )
+    await user.click(screen.getByRole('button', { name: 'Add download' }))
+    await waitFor(() => expect(done).toHaveBeenCalled())
+    expect(
+      invoke.mock.calls.find(
+        ([command]) => command === 'create_configured_download',
+      )?.[1],
+    ).toMatchObject({ input: { startNow: true } })
+  })
+
+  it('keeps the queue pause visible if resuming fails', async () => {
+    invoke.mockImplementation(async (command: string) => {
+      if (command === 'get_queue_policies')
+        return [
+          {
+            id: 'default',
+            name: 'Downloads',
+            paused: true,
+            maxConcurrent: 3,
+            bytesPerSecond: 0,
+            taskCount: 0,
+          },
+        ]
+      if (command === 'save_queue_policy') throw new Error('Resume failed')
+      return support(command)
+    })
+    const { user } = setup()
+    await user.click(
+      await screen.findByRole('button', { name: 'Resume queue' }),
+    )
+    expect(await screen.findByRole('alert')).toBeVisible()
+    expect(screen.getByText('Downloads queue is paused')).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Resume queue' })).toBeEnabled()
+  })
+
   it('keeps optional fields hidden until enabled and validates URLs', async () => {
     const { user } = setup()
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
@@ -111,6 +178,9 @@ describe('compact download window', () => {
     await user.click(screen.getByLabelText('Start automatically'))
     await user.click(screen.getByRole('button', { name: 'Add download' }))
     await waitFor(() => expect(done).toHaveBeenCalledOnce())
+    expect(
+      invoke.mock.calls.some(([command]) => command === 'open_progress_window'),
+    ).toBe(false)
     expect(invoke).toHaveBeenCalledWith('create_configured_download', {
       input: {
         url: 'https://example.com/file.zip',
@@ -467,4 +537,15 @@ it('does not close on Escape while a download is being submitted', async () => {
     invoke.mock.calls.some(([command]) => command === 'close_download_window'),
   ).toBe(false)
   await act(async () => complete(task()))
+})
+
+it('opens progress automatically only after successfully adding an immediately started download', async () => {
+  const { user, done } = setup()
+  await user.type(
+    screen.getByLabelText('Download URL'),
+    'https://example.com/file.zip',
+  )
+  await user.click(screen.getByRole('button', { name: 'Add download' }))
+  await waitFor(() => expect(done).toHaveBeenCalledOnce())
+  expect(invoke).toHaveBeenCalledWith('open_progress_window')
 })

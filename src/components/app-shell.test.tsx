@@ -52,35 +52,33 @@ beforeEach(() => {
   )
 })
 describe('shell and shared pages', () => {
-  it('uses one menubar for pages and a resizable category sidebar', async () => {
+  it('shows direct page navigation and a resizable category sidebar', async () => {
     invoke.mockResolvedValue([])
-    const { view, user } = await setup('/downloads/missing')
+    const { view } = await setup('/downloads/missing')
     expect(
-      screen.getAllByRole('menubar', { name: 'Application menu' }),
-    ).toHaveLength(1)
+      screen.getByRole('navigation', { name: 'Main navigation' }),
+    ).toBeInTheDocument()
     expect(
-      screen.queryByRole('navigation', { name: 'Main navigation' }),
+      screen.queryByRole('menuitem', { name: 'Pages' }),
     ).not.toBeInTheDocument()
     expect(view.container.querySelector('aside')).toBeInTheDocument()
     expect(
       screen.getByRole('separator', { name: 'Resize download sidebar' }),
     ).toBeInTheDocument()
-    await user.click(screen.getByRole('menuitem', { name: 'Pages' }))
     expect(
-      await screen.findByRole('menuitem', { name: 'Downloads' }),
+      await screen.findByRole('link', { name: 'Downloads' }),
     ).toHaveAttribute('aria-current', 'page')
-    expect(
-      screen.getByRole('menuitem', { name: 'Overview' }),
-    ).not.toHaveAttribute('aria-current')
+    expect(screen.getByRole('link', { name: 'Overview' })).not.toHaveAttribute(
+      'aria-current',
+    )
   })
-  it('opens Downloads at startup and keeps other pages in the menu', async () => {
+  it('opens Downloads at startup and navigates directly to other pages', async () => {
     invoke.mockResolvedValue([task()])
     const { router, user } = await setup('/')
     await screen.findByRole('table')
     expect(router.state.location.pathname).toBe('/downloads')
-    await user.click(screen.getByRole('menuitem', { name: 'Pages' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Settings' }))
-    await screen.findByRole('heading', { name: 'Settings' })
+    await user.click(await screen.findByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'General' })
     expect(
       screen.queryByRole('complementary', { name: 'Download filters' }),
     ).not.toBeInTheDocument()
@@ -98,56 +96,53 @@ describe('shell and shared pages', () => {
   it('persists appearance choices from application options', async () => {
     invoke.mockResolvedValue([])
     const { user } = await setup()
-    await user.click(screen.getByRole('menuitem', { name: 'Appearance' }))
+    await user.click(screen.getByRole('button', { name: 'Appearance' }))
     expect(
-      await screen.findByRole('menuitemradio', { name: 'System' }),
-    ).toHaveAttribute('aria-checked', 'true')
-    await user.click(screen.getByRole('menuitemradio', { name: 'Dark' }))
+      await screen.findByRole('button', { name: 'System' }),
+    ).toHaveAttribute('aria-pressed', 'true')
+    await user.click(screen.getByRole('button', { name: 'Dark' }))
     await waitFor(() => expect(document.documentElement).toHaveClass('dark'))
     expect(localStorage.getItem('vite-ui-theme')).toBe('dark')
-    await user.click(screen.getByRole('menuitem', { name: 'Appearance' }))
-    expect(
-      await screen.findByRole('menuitemradio', { name: 'Dark' }),
-    ).toHaveAttribute('aria-checked', 'true')
+    expect(await screen.findByRole('button', { name: 'Dark' })).toHaveAttribute(
+      'aria-pressed',
+      'true',
+    )
     await user.keyboard('{Escape}')
-    await user.click(screen.getByRole('menuitem', { name: 'Pages' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Downloads' }))
+    await user.click(await screen.findByRole('link', { name: 'Downloads' }))
     expect(
       await screen.findByRole('heading', { name: 'Downloads' }),
     ).toBeInTheDocument()
     expect(screen.queryByRole('menu')).not.toBeInTheDocument()
   })
-  it('supports keyboard options navigation and Escape focus return', async () => {
+  it('supports keyboard appearance controls and Escape focus return', async () => {
     invoke.mockResolvedValue([])
     const { user } = await setup()
-    const options = screen.getByRole('menuitem', { name: 'Appearance' })
+    const options = screen.getByRole('button', { name: 'Appearance' })
     options.focus()
-    await user.keyboard('{ArrowDown}')
+    await user.keyboard('{Enter}')
     expect(
-      await screen.findByRole('menuitemradio', { name: 'System' }),
+      await screen.findByRole('button', { name: 'System' }),
     ).toBeInTheDocument()
     await user.keyboard('{Escape}')
     await waitFor(() => expect(options).toHaveFocus())
   })
-  it('filters downloads through sidebar categories and keeps the query', async () => {
+  it('filters downloads through tabs and keeps the search query', async () => {
     invoke.mockResolvedValue([
       task(),
       task({ id: 'paused', status: 'paused', fileName: 'paused.zip' }),
     ])
     const { user, router } = await setup('/downloads?q=zip')
-    const categories = await screen.findByRole('navigation', {
-      name: 'Download categories',
-    })
-    await user.click(within(categories).getByRole('link', { name: /Paused/ }))
+    await user.click(await screen.findByRole('tab', { name: /Paused/ }))
     await waitFor(() =>
       expect(router.state.location.search).toMatchObject({
         q: 'zip',
         status: 'paused',
       }),
     )
-    expect(
-      within(categories).getByRole('link', { name: /Paused/ }),
-    ).toHaveAttribute('aria-current', 'page')
+    expect(screen.getByRole('tab', { name: /Paused/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
     expect(
       within(await screen.findByRole('table')).getByText('paused.zip'),
     ).toBeInTheDocument()
@@ -155,21 +150,90 @@ describe('shell and shared pages', () => {
       within(screen.getByRole('table')).queryByText('file.zip'),
     ).not.toBeInTheDocument()
   })
-  it('keeps status filters visible and highlights the selected filter', async () => {
+  it('highlights the selected tab and keeps organization in the sidebar', async () => {
     invoke.mockResolvedValue([task({ status: 'completed' })])
     await setup('/downloads?status=completed')
-    const categories = screen.getByRole('navigation', {
-      name: 'Download categories',
+    expect(screen.getByRole('tab', { name: /Completed/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    expect(screen.getByRole('tab', { name: /Active/ })).toBeInTheDocument()
+    expect(
+      screen.getByRole('navigation', { name: 'Download categories' }),
+    ).toHaveTextContent('Organize files')
+    expect(screen.getByRole('tab', { name: /All/ })).toHaveAttribute(
+      'aria-selected',
+      'false',
+    )
+  })
+  it('switches the sidebar to settings sections and shows only the chosen panel', async () => {
+    invoke.mockResolvedValue([])
+    const { user, router } = await setup('/settings')
+    const navigation = screen.getByRole('navigation', {
+      name: 'Settings navigation',
     })
     expect(
-      within(categories).getByRole('link', { name: /Completed/ }),
-    ).toHaveAttribute('aria-current', 'page')
+      screen.queryByRole('navigation', { name: 'Download categories' }),
+    ).not.toBeInTheDocument()
+    await user.click(
+      within(navigation).getByRole('link', { name: 'Transfers' }),
+    )
     expect(
-      within(categories).getByRole('link', { name: /Downloading/ }),
+      await screen.findByRole('heading', { name: 'Transfers' }),
     ).toBeInTheDocument()
+    expect(router.state.location.search).toMatchObject({ section: 'downloads' })
+    expect(screen.queryByText('Approved folders')).not.toBeInTheDocument()
+    await user.click(within(navigation).getByRole('link', { name: 'Folders' }))
     expect(
-      within(categories).getByRole('link', { name: /All downloads/ }),
-    ).not.toHaveAttribute('aria-current')
+      await screen.findByRole('heading', { name: 'Folders' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Approved folders')).toBeInTheDocument()
+    expect(
+      screen.queryByLabelText('Connections per download'),
+    ).not.toBeInTheDocument()
+  })
+  it('supports keyboard tabs and groups active transfer states', async () => {
+    invoke.mockResolvedValue([
+      task({ id: 'queued', status: 'queued', fileName: 'waiting.zip' }),
+      task({ id: 'running', status: 'downloading', fileName: 'running.zip' }),
+      task({ id: 'done', status: 'completed', fileName: 'done.zip' }),
+    ])
+    const { user, router } = await setup('/downloads')
+    const all = await screen.findByRole('tab', { name: /All/ })
+    all.focus()
+    await user.keyboard('{ArrowRight}')
+    await user.keyboard('{Enter}')
+    await waitFor(() =>
+      expect(router.state.location.search).toMatchObject({ status: 'active' }),
+    )
+    expect(screen.getByRole('tab', { name: /Active/ })).toHaveAttribute(
+      'aria-selected',
+      'true',
+    )
+    const panel = await screen.findByRole('tabpanel')
+    expect(within(panel).getByText('waiting.zip')).toBeInTheDocument()
+    expect(within(panel).getByText('running.zip')).toBeInTheDocument()
+    expect(within(panel).queryByText('done.zip')).not.toBeInTheDocument()
+  })
+  it('opens credentials directly without loading unrelated settings panels', async () => {
+    invoke.mockResolvedValue([])
+    await setup('/settings?section=credentials')
+    expect(
+      await screen.findByRole('heading', { name: 'Credentials' }),
+    ).toBeInTheDocument()
+    expect(screen.getByLabelText('Credential password')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Proxy origin')).not.toBeInTheDocument()
+    expect(
+      screen.queryByRole('navigation', { name: 'Download categories' }),
+    ).not.toBeInTheDocument()
+    expect(
+      invoke.mock.calls.some(
+        ([command]) =>
+          command === 'get_network_settings' ||
+          command === 'get_settings' ||
+          command === 'list_destinations',
+      ),
+    ).toBe(false)
   })
   it('renders real home summaries and shared navigation', async () => {
     invoke.mockResolvedValue([
@@ -190,8 +254,7 @@ describe('shell and shared pages', () => {
     expect(await screen.findByText('Active transfers')).toBeInTheDocument()
     expect(screen.getByText('Needs attention')).toBeInTheDocument()
     expect(await screen.findAllByText('bad.zip')).toHaveLength(2)
-    await user.click(screen.getByRole('menuitem', { name: 'Pages' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Downloads' }))
+    await user.click(await screen.findByRole('link', { name: 'Downloads' }))
     expect(
       await screen.findByRole('heading', { name: 'Downloads' }),
     ).toBeInTheDocument()
@@ -210,9 +273,8 @@ describe('shell and shared pages', () => {
       initialUrl: '',
       bulk: false,
     })
-    await user.click(screen.getByRole('menuitem', { name: 'Pages' }))
-    await user.click(await screen.findByRole('menuitem', { name: 'Settings' }))
-    await screen.findByRole('heading', { name: 'Settings' })
+    await user.click(await screen.findByRole('link', { name: 'Settings' }))
+    await screen.findByRole('heading', { name: 'General' })
     await user.click(screen.getByRole('button', { name: 'Add download' }))
     expect(
       invoke.mock.calls.filter(
@@ -334,4 +396,15 @@ it('prepares a dropped browser link from the main workspace', async () => {
   expect(
     screen.queryByText('Drop links to add downloads'),
   ).not.toBeInTheDocument()
+})
+
+it('opens all download progress from the toolbar', async () => {
+  invoke.mockResolvedValue([])
+  const { user } = await setup('/downloads')
+  await user.click(
+    screen.getByRole('button', { name: 'Show all download progress' }),
+  )
+  await waitFor(() =>
+    expect(invoke).toHaveBeenCalledWith('open_progress_window'),
+  )
 })

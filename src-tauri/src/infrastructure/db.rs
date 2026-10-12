@@ -616,8 +616,15 @@ impl Database {
                 "This folder is still used by active downloads. Finish or remove them first.",
             ));
         }
-        let settings = self.get_settings()?;
-        if settings.default_destination_id == id {
+        // Reuse the held connection: get_settings() would lock this mutex again.
+        let default_destination_id: String = conn
+            .query_row(
+                "SELECT default_destination_id FROM settings WHERE id = 1",
+                [],
+                |row| row.get(0),
+            )
+            .map_err(map_db_err)?;
+        if default_destination_id == id {
             return Err(AppError::new(
                 ErrorCode::PathNotAllowed,
                 "Choose another default destination before removing this folder.",
@@ -1104,6 +1111,49 @@ mod migration_tests {
         task_b.request_id = Some("req-b".into());
         db_b.upsert_download(&task_b).unwrap();
         assert_eq!(db_a.list_downloads().unwrap().len(), 2);
+    }
+    #[test]
+    fn destination_removal_returns_without_deadlocking_and_preserves_guards() {
+        let (send, receive) = std::sync::mpsc::channel();
+        let worker = std::thread::spawn(move || {
+            let db = Database::open_in_memory().unwrap();
+            db.insert_destination("folder", "Folder", "/tmp/folder", &Utc::now().to_rfc3339())
+                .unwrap();
+            db.update_settings(UpdateSettingsRequest {
+                default_destination_id: Some("folder".into()),
+                ..Default::default()
+            })
+            .unwrap();
+            let default_error = db.remove_destination("folder").unwrap_err();
+            assert_eq!(default_error.code, ErrorCode::PathNotAllowed);
+            assert!(default_error.message.contains("another default"));
+            assert!(db.destination_exists("folder").unwrap());
+            db.update_settings(UpdateSettingsRequest {
+                default_destination_id: Some("default".into()),
+                ..Default::default()
+            })
+            .unwrap();
+
+            let mut task = super::tests::sample_task("using-folder");
+            task.destination_id = "folder".into();
+            db.upsert_download(&task).unwrap();
+            let in_use = db.remove_destination("folder").unwrap_err();
+            assert_eq!(in_use.code, ErrorCode::PathNotAllowed);
+            assert!(db.destination_exists("folder").unwrap());
+            db.remove_download(&task.id).unwrap();
+
+            db.remove_destination("folder").unwrap();
+            assert!(!db.destination_exists("folder").unwrap());
+            assert_eq!(db.get_settings().unwrap().default_destination_id, "default");
+            assert!(db.list_downloads().unwrap().is_empty());
+            let missing = db.remove_destination("folder").unwrap_err();
+            assert_eq!(missing.code, ErrorCode::TaskNotFound);
+            send.send(()).unwrap();
+        });
+        receive
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("folder removal must return and leave the database responsive");
+        worker.join().unwrap();
     }
 }
 

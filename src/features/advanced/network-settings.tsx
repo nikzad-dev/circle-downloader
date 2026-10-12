@@ -14,7 +14,19 @@ import { Label } from '@/components/ui/label'
 import { advanced, advancedKeys, useGrants } from './api'
 import { selectClass } from './task-options-form'
 
-export function NetworkPreferences() {
+export function NetworkPreferences({
+  section,
+}: {
+  section?: 'network' | 'credentials'
+}) {
+  return (
+    <>
+      {section !== 'credentials' && <NetworkSettingsCard />}
+      {section !== 'network' && <CredentialsForm />}
+    </>
+  )
+}
+function NetworkSettingsCard() {
   const query = useQuery({
     queryKey: advancedKeys.network,
     queryFn: advanced.network,
@@ -44,7 +56,6 @@ export function NetworkPreferences() {
           {query.data && <NetworkForm initial={query.data} />}
         </CardContent>
       </Card>
-      <CredentialsForm />
     </>
   )
 }

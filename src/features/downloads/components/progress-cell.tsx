@@ -1,5 +1,6 @@
 import type { DownloadTask } from '@/lib/orpc/schemas'
 import { Progress } from '@/components/ui/progress'
+import { transferPercent } from '../lib/transfer-summary'
 import { formatBytes, formatSpeed } from '../lib/format'
 
 export function ProgressCell({
@@ -9,14 +10,7 @@ export function ProgressCell({
   task: DownloadTask
   compact?: boolean
 }) {
-  const percent =
-    task.totalBytes !== null && task.totalBytes > 0
-      ? Math.min(
-          100,
-          Math.round((task.downloadedBytes / task.totalBytes) * 100),
-        )
-      : null
-  const value = task.status === 'completed' ? 100 : percent
+  const value = transferPercent(task)
   if (compact)
     return (
       <div
