@@ -63,6 +63,17 @@ Desktop.ini
 *.sqlite
 *.sqlite-*
 *.sqlite3
+
+# Native signing secrets and keyfiles
+*.p8
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.key
+*.pem
+*.mobileprovision
+*.provisionprofile
 *.sqlite3-*
 
 # Persistent OS lease sentinel (do not remove while an app is running)

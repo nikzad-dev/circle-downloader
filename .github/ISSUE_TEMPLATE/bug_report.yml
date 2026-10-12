@@ -1,0 +1,64 @@
+name: Bug Report
+description: Report a reproducible defect, crash, or unexpected behavior in Circle Downloader
+title: '[Bug]: '
+labels: ['bug']
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for reporting an issue! Please check existing issues first.
+        If this is a security vulnerability, please refer to [SECURITY.md](https://github.com/nikzad-dev/circle-downloader/blob/main/SECURITY.md) instead.
+  - type: input
+    id: version
+    attributes:
+      label: Circle Downloader Version
+      description: What version of Circle Downloader are you using (e.g. 0.1.0, commit SHA)?
+      placeholder: '0.1.0'
+    validations:
+      required: true
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating System
+      description: What OS are you running?
+      options:
+        - macOS (Apple Silicon - aarch64)
+        - macOS (Intel - x86_64)
+        - Windows 11
+        - Windows 10
+        - Linux (Ubuntu / Debian)
+        - Linux (Arch / Fedora / Other)
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Describe the exact steps to reproduce the issue.
+      placeholder: |
+        1. Add a download with URL '...'
+        2. Set destination to '...'
+        3. Pause download at 50%
+        4. Restart the app
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual Behavior
+      description: What actually happened? (Include error messages, codes, or unexpected UI state)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs / Console Output
+      description: Relevant terminal or console logs if running from CLI or debug build.
+      render: shell

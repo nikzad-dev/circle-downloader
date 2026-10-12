@@ -9,7 +9,6 @@ const { invoke, channels } = vi.hoisted(() => ({
 vi.mock('@tauri-apps/api/core', () => ({
   invoke,
   Channel: class {
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     onmessage = (_payload: unknown) => {}
     constructor() {
       channels.push(this)

@@ -23,7 +23,8 @@
     "fmt:rust": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "clippy:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "sbom": "node scripts/generate-sbom.mjs"
   },
   "dependencies": {
     "@base-ui/react": "^1.9.0",
