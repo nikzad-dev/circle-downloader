@@ -1,0 +1,7 @@
+dist
+src-tauri/target
+src-tauri/gen
+src/components/ui
+src/routeTree.gen.ts
+bun.lock
+package-lock.json
